@@ -68,6 +68,7 @@ def test_ok_writes_the_settings(settings_file):
     dlg._backup.setChecked(False)
     dlg._invert.setChecked(True)
     dlg._invert_orbit.setChecked(True)
+    dlg._look_sens.setValue(40)
     dlg._msaa.setCurrentIndex(dlg._msaa.findData(8))
     dlg.accept()
     st = _fresh(settings_file)
@@ -81,6 +82,7 @@ def test_ok_writes_the_settings(settings_file):
     assert st.value("general/backup") == "0"
     assert st.value("nav/invert_wheel") == "1"
     assert st.value("nav/invert_orbit_y") == "1"
+    assert int(st.value("walk/look_sensitivity")) == 40
     assert int(st.value("display/msaa")) == 8
     # The live pieces reach the viewport immediately.
     assert win.viewport._invert_wheel is True
@@ -113,7 +115,8 @@ def test_dialog_reloads_saved_values(settings_file):
     st.setValue("import/dxf_unit", "in")
     st.setValue("ia/proveedor", "auto")
     st.sync()
-    dlg = PreferencesDialog(_Win())
+    win = _Win()                 # referenced: see the theme test below
+    dlg = PreferencesDialog(win)
     assert dlg._dxf_unit.currentData() == "in"
     assert dlg._provider.currentData() == "auto"
 
@@ -152,3 +155,22 @@ def test_toolbar_icon_size_lives_in_preferences_and_reaches_every_toolbar(settin
         assert toolbar_icon_px() == 40
     finally:
         monkeypatch.undo()
+
+
+def test_theme_choice_applies_at_once(settings_file):
+    from views import theme
+    app = QApplication.instance()
+    before = theme.saved_theme()
+    try:
+        # Keep the parent referenced: a bare ``_Win()`` is collected at
+        # once and takes the dialog (its child, tabs and all) with it —
+        # the use-after-free behind the suite's exit segfault.
+        win = _Win()
+        dlg = PreferencesDialog(win)
+        dlg._theme.setCurrentIndex(dlg._theme.findData(theme.LIGHT))
+        dlg.accept()
+        assert theme.saved_theme() == theme.LIGHT
+        assert app.palette().window().color().lightness() > 128
+    finally:
+        theme.save_theme(before)
+        theme.apply_theme(app, theme.DARK)

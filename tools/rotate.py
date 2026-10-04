@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""Rotate tool (Q): turn geometry with SketchUp's protractor.
+"""Rotate tool (Q): turn geometry with the classic protractor.
 
 The instrument is the shared :class:`~tools.protractor.ProtractorBase` —
-Rotate shows the same protractor as the Protractor tool (SketchUp,
-help.sketchup.com "Flipping, Mirroring, Rotating and Arrays"):
+Rotate shows the same protractor as the Protractor tool:
 
 - Before the centre click the disc follows the cursor, aligned to the face
   underneath and coloured by the rotation axis (red/green/blue on axis
   planes); arrow keys lock the plane, Shift freezes it.
 - CLICK-DRAG from the centre sets a custom rotation axis along the drag
-  (SketchUp's fold-along-a-line gesture); a plain click keeps the inferred
+  (the classic fold-along-a-line gesture); a plain click keeps the inferred
   plane.
 - Second click sets the reference arm; the geometry swings live with the
   cursor, snapping to the 15° ticks near the disc and free at 0.1° farther
@@ -45,7 +44,7 @@ from core.history import (
 )
 from core.i18n import tr
 from core.mesh import Edge, Face, Mesh
-from core.triangulate import plane_axes
+from core.axes import plane_axes  # drawing axes (#44)
 from tools.base import ToolContext
 from tools.move import gather_targets
 from tools.protractor import ProtractorBase
@@ -54,6 +53,9 @@ from tools.protractor import ProtractorBase
 class RotateTool(ProtractorBase):
     name = "Rotate"
     shortcut = "Q"
+    description = (
+        "Turn the selection around a centre with the protractor; Ctrl "
+        "leaves a copy behind.")
     vcb_label = "Angle"
     accepts_angle_ratio = True  # VCB "3:12" (rise:run) arrives as degrees
     accepts_array = True  # VCB "3x" / "/3" after a copy: a POLAR array
@@ -69,6 +71,7 @@ class RotateTool(ProtractorBase):
         self._sel_edges: list = []
         self._base_segments: list = []      # wireframe for the copy preview
         self._preview_deg = 0.0
+        self._orig = None                   # the preview's snapshot
         self._copy = False                  # Ctrl: rotate a COPY
         self._last: dict | None = None      # hot retype of the last rotation
 
@@ -89,7 +92,7 @@ class RotateTool(ProtractorBase):
 
     # ---- Keyboard -----------------------------------------------------------
     def on_key(self, viewport, key: int, modifiers) -> bool:
-        # Ctrl toggles copy mode (SketchUp: rotate a copy, original stays).
+        # Ctrl toggles copy mode (rotate a copy, original stays).
         if key == Qt.Key_Control:
             self._copy = not self._copy
             if self._copy:
@@ -111,7 +114,7 @@ class RotateTool(ProtractorBase):
             splanes = [p for p in viewport.scene.selection
                        if isinstance(p, SectionPlane)]
             if not splanes and not viewport.scene.selection:
-                # SketchUp: Rotate grabs a section plane directly by its
+                # Rotate grabs a section plane directly by its
                 # frame, no pre-selection needed.
                 pick = getattr(viewport, "pick_section_plane", None)
                 sp = (pick(ctx.screen.x(), ctx.screen.y())
@@ -150,7 +153,8 @@ class RotateTool(ProtractorBase):
                 return
             self.ref_point = ctx.world
             return
-        deg = self._display_deg(ctx.world)
+        self._note_snap(ctx)
+        deg = self._commit_deg(ctx.world)
         if deg is not None:
             self._commit(viewport, deg)
 
@@ -159,15 +163,16 @@ class RotateTool(ProtractorBase):
         self._track_axis_drag(ctx.viewport)   # live tilt preview (issue #25)
         self._infer_plane(ctx)
         self._update_screen_metrics(ctx)
+        self._note_snap(ctx)
         if self.ref_point is not None and not self._copy:
-            deg = self._display_deg(ctx.world)
+            deg = self._commit_deg(ctx.world)
             if deg is not None:
                 self._apply_preview(ctx.viewport, deg)
         ctx.viewport.update()
 
     def on_release(self, viewport) -> None:
         """A real DRAG from the centre fixes the rotation axis along it
-        (SketchUp's fold gesture); a plain click keeps the inferred plane.
+        (the classic fold gesture); a plain click keeps the inferred plane.
         The gesture lives in :class:`ProtractorBase`, shared with the
         Protractor tool."""
         if self._release_axis_drag(viewport):
@@ -185,7 +190,7 @@ class RotateTool(ProtractorBase):
             self._commit(viewport, sign * abs(value))
             return True
         if self._last is not None:
-            # Hot retype (SketchUp): redo the rotation just made at the new
+            # Hot retype: redo the rotation just made at the new
             # angle. A typed negative flips the side.
             last = self._last
             stack = getattr(viewport.history, "undo_stack", None)
@@ -207,7 +212,7 @@ class RotateTool(ProtractorBase):
         return False
 
     def on_array_value(self, viewport, count: int, mode: str) -> bool:
-        """SketchUp's polar array, typed right after a rotate-COPY: ``3x``
+        """The classic polar array, typed right after a rotate-COPY: ``3x``
         lays three copies at multiples of the angle (30° → 30/60/90) and
         ``/3`` three copies dividing it (90° → 30/60/90). Retyping re-lays
         the fan; the window closes at the next click or tool change.
@@ -249,7 +254,7 @@ class RotateTool(ProtractorBase):
     # ---- Snap exclusion -----------------------------------------------------
     def snap_excluded(self):
         """The geometry swinging live, left out of the snap candidates so
-        the tool never infers against itself (SketchUp; issue #19). Mirrors
+        the tool never infers against itself (issue #19). Mirrors
         MoveTool.snap_excluded; in copy mode the original stays put."""
         if self.ref_point is None or self._copy:
             return None
@@ -277,7 +282,7 @@ class RotateTool(ProtractorBase):
         segments.append((self.start_point, self.hover_point))
         if self.ref_point is not None:
             segments.append((self.start_point, self.ref_point))
-            deg = self._display_deg(self.hover_point)
+            deg = self._commit_deg(self.hover_point)
             if deg is not None:
                 segments.extend(self._arc_segments(deg))
                 if self._copy and self._base_segments:
@@ -351,55 +356,70 @@ class RotateTool(ProtractorBase):
         for e in self._sel_edges:
             self._base_segments.append((QVector3D(e.a), QVector3D(e.b)))
 
-    def _rotate_live(self, viewport, step_deg: float) -> None:
-        if abs(step_deg) < 1e-12:
-            return
-        m = rotation_matrix(self.start_point, self._axis(), step_deg)
-        if getattr(self, "_vp_preview", False):
-            # Viewport-side preview: only section planes deform live; the
-            # groups draw through the preview matrix, untouched.
-            for sp in self._splanes:
-                sp.point = m.map(sp.point)
-                n2 = m.mapVector(sp.normal)
-                if n2.length() > 1e-12:
-                    sp.normal = n2.normalized()
-            for im in self._images:
-                im.origin = m.map(im.origin)
-                im.u = m.mapVector(im.u)
-                im.v = m.mapVector(im.v)
-            return
-        for group in self._groups:
-            if getattr(group, "xform", None) is not None:
-                group.xform = m * group.xform   # instance: O(1)
-            else:
-                gmesh = group.mesh
-                for vx in list(gmesh.vertices):
-                    gmesh.move_vertex(vx, m.map(vx.position) - vx.position)
-        for vx in self._verts:
-            viewport.scene.mesh.move_vertex(
-                vx, m.map(vx.position) - vx.position)
-        for sp in self._splanes:
-            sp.point = m.map(sp.point)
-            n2 = m.mapVector(sp.normal)
-            if n2.length() > 1e-12:
-                sp.normal = n2.normalized()
-        for im in self._images:
-            im.origin = m.map(im.origin)
-            im.u = m.mapVector(im.u)
-            im.v = m.mapVector(im.v)
-        viewport.scene.version += 1
+    def _snapshot(self) -> dict:
+        """The rotating set exactly as it was before the preview touched it.
+
+        The live preview used to turn everything by the DELTA of each mouse
+        move and, to cancel or commit, turn it back by the total: hundreds
+        of single-precision rotations that do not cancel, so the geometry
+        the commit started from had already drifted (issue #163). Every
+        preview frame is now computed from this copy, and reverting puts
+        these exact values back."""
+        snap = getattr(self, "_orig", None)
+        if snap is not None:
+            return snap
+        from PySide6.QtGui import QMatrix4x4
+        snap = {"xf": [], "gv": [], "v": [], "sp": [], "im": []}
+        vp_only = getattr(self, "_vp_preview", False)
+        if not vp_only:
+            for group in self._groups:
+                if getattr(group, "xform", None) is not None:
+                    snap["xf"].append((group, QMatrix4x4(group.xform)))
+                else:
+                    snap["gv"].extend((group.mesh, vx, QVector3D(vx.position))
+                                      for vx in list(group.mesh.vertices))
+            snap["v"] = [(vx, QVector3D(vx.position)) for vx in self._verts]
+        snap["sp"] = [(sp, QVector3D(sp.point), QVector3D(sp.normal))
+                      for sp in self._splanes]
+        snap["im"] = [(im, QVector3D(im.origin), QVector3D(im.u),
+                       QVector3D(im.v)) for im in self._images]
+        self._orig = snap
+        return snap
+
+    def _pose(self, viewport, m) -> None:
+        """Place the rotating set at ``m`` applied to its snapshot
+        (``None`` puts the snapshot back as it was)."""
+        snap = self._snapshot()
+        for group, xf in snap["xf"]:
+            group.xform = (m * xf) if m is not None else xf
+        for gmesh, vx, pos in snap["gv"]:
+            gmesh.place_vertex(vx, m.map(pos) if m is not None else pos)
+        for vx, pos in snap["v"]:
+            viewport.scene.mesh.place_vertex(
+                vx, m.map(pos) if m is not None else pos)
+        for sp, point, normal in snap["sp"]:
+            sp.point = m.map(point) if m is not None else QVector3D(point)
+            n2 = m.mapVector(normal) if m is not None else QVector3D(normal)
+            sp.normal = n2.normalized() if n2.length() > 1e-12 else normal
+        for im, origin, u, v in snap["im"]:
+            im.origin = m.map(origin) if m is not None else QVector3D(origin)
+            im.u = m.mapVector(u) if m is not None else QVector3D(u)
+            im.v = m.mapVector(v) if m is not None else QVector3D(v)
+        if snap["xf"] or snap["gv"] or snap["v"]:
+            viewport.scene.version += 1
 
     def _apply_preview(self, viewport, target_deg: float) -> None:
-        self._rotate_live(viewport, target_deg - self._preview_deg)
+        m = rotation_matrix(self.start_point, self._axis(), target_deg)
+        self._pose(viewport, m)
         self._preview_deg = target_deg
         if getattr(self, "_vp_preview", False):
-            viewport.set_groups_preview_matrix(rotation_matrix(
-                self.start_point, self._axis(), target_deg))
+            viewport.set_groups_preview_matrix(m)
 
     def _revert_preview(self, viewport) -> None:
-        if abs(self._preview_deg) > 1e-12:
-            self._rotate_live(viewport, -self._preview_deg)
-            self._preview_deg = 0.0
+        if getattr(self, "_orig", None) is not None:
+            self._pose(viewport, None)       # the exact values from before
+            self._orig = None
+        self._preview_deg = 0.0
         if getattr(self, "_vp_preview", False):
             from PySide6.QtGui import QMatrix4x4
             viewport.set_groups_preview_matrix(QMatrix4x4())  # park, keep freeze
@@ -488,7 +508,7 @@ class RotateTool(ProtractorBase):
             cmd = build([deg])
             if cmd is not None:
                 viewport.history.execute(cmd)
-                # SketchUp: the angle stays hot — typing a value + Enter
+                # The angle stays hot — typing a value + Enter
                 # redoes this rotation until the next click or tool change,
                 # and after a COPY «3x» / «/3» fan it into a polar array.
                 self._last = {"cmd": cmd, "build": build, "deg": float(deg),
@@ -508,4 +528,5 @@ class RotateTool(ProtractorBase):
         self._sel_edges = []
         self._base_segments = []
         self._preview_deg = 0.0
+        self._orig = None       # the preview's snapshot (see _snapshot)
         self._copy = False      # the Ctrl modifier arms ONE operation

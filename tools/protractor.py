@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""Protractor tool (Shift+H) and the shared SketchUp protractor mechanics.
+"""Protractor tool (Shift+H) and the shared protractor mechanics.
 
-:class:`ProtractorBase` holds everything SketchUp's protractor cursor does —
+:class:`ProtractorBase` holds everything the protractor cursor does —
 Rotate (Q) shows the same instrument, so both tools share it:
 
 - Before the first click the disc follows the cursor, aligned to the face
@@ -13,17 +13,17 @@ Rotate (Q) shows the same instrument, so both tools share it:
   the vertex/centre is placed.
 - The disc keeps a fixed SCREEN size, with tick marks every 15° (long at
   90°), zero aligned to the base arm once set.
-- SketchUp's distance rule: near the disc the cursor snaps to the 15° ticks;
+- The distance rule: near the disc the cursor snaps to the 15° ticks;
   farther out the angle is free at 0.1° precision.
 - The Measurements box accepts degrees (``34.1``) or a slope as rise:run
   (``3:12``, ``1:6``) — ``accepts_angle_ratio`` delivers it as degrees.
 - CLICK-DRAG from the vertex tilts the instrument: the drag sets the
   protractor's axis (the normal of its plane) along the dragged direction,
-  off the orthogonal planes — SketchUp's gesture on both Protractor and
+  off the orthogonal planes — the same gesture on both Protractor and
   Rotate (issue #10, @pacaeiro). A plain click keeps the inferred plane.
 
 :class:`ProtractorTool` (this file) creates ANGLED guide lines with it
-(help.sketchup.com "Measuring Angles" / "Using Guides"): vertex → base arm →
+(the classic angled-guide workflow): vertex → base arm →
 sweep & click = an infinite dashed guide through the vertex. The tool then
 resets, but the angle stays "hot": typing a value re-aims the guide just
 created until the next click or tool change.
@@ -42,14 +42,14 @@ from PySide6.QtGui import QVector3D
 from core.guide import Guide
 from core.history import AddGuideCommand, ChangeGuideCommand
 from core.snap import COLOR_AXIS_X, COLOR_AXIS_Y, COLOR_AXIS_Z
-from core.triangulate import plane_axes
+from core.axes import plane_axes  # drawing axes (#44)
 from tools.base import Tool, ToolContext
 
-# The disc keeps a fixed SCREEN size (SketchUp); ticks every 15 degrees.
+# The disc keeps a fixed SCREEN size; ticks every 15 degrees.
 DISC_PX = 60.0
 TICK_DEG = 15.0
-_AXES = {"x": QVector3D(1, 0, 0), "y": QVector3D(0, 1, 0),
-         "z": QVector3D(0, 0, 1)}
+# The drawing axes (core.axes): the open group's own inside it (#44).
+from core.axes import AXES as _AXES  # noqa: E402
 _AXIS_RGBA = {"x": (*COLOR_AXIS_X, 1.0), "y": (*COLOR_AXIS_Y, 1.0),
               "z": (*COLOR_AXIS_Z, 1.0)}
 _OFF_AXIS_RGBA = (0.24, 0.27, 0.32, 1.0)
@@ -58,11 +58,20 @@ _OFF_AXIS_RGBA = (0.24, 0.27, 0.32, 1.0)
 class ProtractorBase(Tool):
     """Shared protractor state + behaviour (see module docstring)."""
 
+    def value_is_unitless(self) -> bool:
+        """The typed value is an ANGLE: the document's length unit must
+        not scale it («45» was 0.045° in a millimetre model, #176)."""
+        return True
+
     #: The Line tool's axis magnet for the arms (@pacaeiro, issue #41): a
     #: base arm within 3° of an axis that lies in the disc's plane lands
     #: on it. Only the world half — the screen detector would hand back a
     #: point on an axis OUTSIDE the disc's plane, which an arm cannot be.
     magnetic_axis_deg = 3.0
+    #: The arms are directions from the centre, not lines being drawn: the
+    #: snap engine leaves out 'through point', 'extension' and 'from point'
+    #: for them, so the axis magnet is not outvoted (issue #140).
+    radial_arm = True
 
     def __init__(self) -> None:
         self.start_point: QVector3D | None = None   # the protractor centre
@@ -80,6 +89,9 @@ class ProtractorBase(Tool):
         self._axis_drag_live: QVector3D | None = None
         self._disc_r = 1.0                          # world radius of the disc
         self._snap_ticks = False                    # cursor near the disc?
+        #: The cursor is held by an inference (an endpoint, an axis, an
+        #: intersection...): the arm must reach THAT point exactly.
+        self._exact_snap = False
 
     # ---- Click-drag axis ----------------------------------------------------
     #: How far the cursor must travel from the vertex for the press to read
@@ -112,7 +124,7 @@ class ProtractorBase(Tool):
 
     def _release_axis_drag(self, viewport) -> bool:
         """A real DRAG from the centre fixes the instrument's axis along it
-        (SketchUp's fold gesture on Rotate, and the Protractor's way off the
+        (the fold gesture on Rotate, and the Protractor's way off the
         orthogonal planes); a plain click keeps the inferred plane. Returns
         True when an axis was set."""
         if not self._axis_drag_armed:
@@ -130,7 +142,7 @@ class ProtractorBase(Tool):
     # ---- Keyboard -----------------------------------------------------------
     def on_key(self, viewport, key: int, modifiers) -> bool:
         # Ctrl toggles guide creation on the tools that leave one behind
-        # (SketchUp: measure, or measure AND mark). Subclasses that never
+        # (measure, or measure AND mark). Subclasses that never
         # create a guide — Rotate — take their own Ctrl first and never
         # reach here.
         if key == Qt.Key_Control and hasattr(type(self), "_guides"):
@@ -147,7 +159,7 @@ class ProtractorBase(Tool):
                 hint()                   # the clause says the new mode
             viewport.update()
             return True
-        # Arrow keys lock the protractor plane to an axis (SketchUp): Right =
+        # Arrow keys lock the protractor plane to an axis: Right =
         # red, Left = green, Up = blue; the same arrow again releases it.
         picks = {Qt.Key_Right: "x", Qt.Key_Left: "y", Qt.Key_Up: "z"}
         axis = picks.get(key)
@@ -164,7 +176,7 @@ class ProtractorBase(Tool):
     # ---- Plane / colour -----------------------------------------------------
     @property
     def wireframe_color(self):  # type: ignore[override]
-        # The disc is coloured by its rotation axis (SketchUp): red/green/blue
+        # The disc is coloured by its rotation axis: red/green/blue
         # on an axis plane, dark on an arbitrary face plane.
         n = self._axis()
         for axis, v in _AXES.items():
@@ -184,7 +196,7 @@ class ProtractorBase(Tool):
         return QVector3D(0.0, 0.0, 1.0)
 
     def _infer_plane(self, ctx: ToolContext) -> None:
-        """SketchUp plane inference, active until the vertex is placed: the
+        """Plane inference, active until the vertex is placed: the
         disc aligns to the face under the cursor (Shift freezes it, arrows
         override it); empty ground measures in plan."""
         shift = bool(ctx.modifiers & Qt.ShiftModifier)
@@ -210,7 +222,7 @@ class ProtractorBase(Tool):
 
     # ---- Screen metrics / snapping ------------------------------------------
     def _update_screen_metrics(self, ctx: ToolContext) -> None:
-        """Fixed screen-size disc + SketchUp's distance rule: near the disc
+        """Fixed screen-size disc + the distance rule: near the disc
         the cursor snaps to the 15° ticks, farther out it measures free at
         0.1° precision."""
         w2p = getattr(ctx.viewport, "_world_to_pixel", None)
@@ -250,7 +262,7 @@ class ProtractorBase(Tool):
         return deg
 
     def _display_deg(self, point: QVector3D) -> float | None:
-        """The angle as SketchUp reports and commits it: snapped to the 15°
+        """The angle as the tool reports and commits it: snapped to the 15°
         ticks near the disc, 0.1° precision farther out."""
         deg = self._angle_to(point)
         if deg is None:
@@ -260,6 +272,29 @@ class ProtractorBase(Tool):
             if deg <= -180.0:
                 deg += 360.0
         return round(deg, 1)
+
+    #: Snap kinds that are NOT a precise target: the free cursor and a
+    #: point merely on a face. Everything else (endpoint, midpoint,
+    #: intersection, on-edge, axis, guide...) is a point the user aimed at.
+    _FREE_SNAPS = frozenset({"none", "on_face"})
+
+    def _note_snap(self, ctx) -> None:
+        """Remember whether the cursor is held by an inference."""
+        snap = getattr(ctx, "snap", None)
+        kind = getattr(snap, "kind", "none") or "none"
+        self._exact_snap = kind not in self._FREE_SNAPS
+
+    def _commit_deg(self, point: QVector3D) -> float | None:
+        """The angle to APPLY: exact when the cursor sits on an inferred
+        point, so the arm lands on it; otherwise the displayed
+        value -- the 15° tick near the disc, 0.1° farther out.
+
+        Issue #163: the rotation always applied the 0.1°-rounded angle, so
+        a panel swung to an endpoint missed it by ~0.7 mm two metres out
+        (70.2789° applied as 70.3°). The label still reads 0.1°."""
+        if self._exact_snap and not self._snap_ticks:
+            return self._angle_to(point)
+        return self._display_deg(point)
 
     def _direction_at(self, deg: float) -> QVector3D:
         """Unit direction of the base arm rotated by ``deg`` in the plane."""
@@ -303,12 +338,13 @@ class ProtractorBase(Tool):
         self._axis_drag_live = None
         self._axis_drag_armed = False
         self._snap_ticks = False
+        self._exact_snap = False
 
 
 class ProtractorTool(ProtractorBase):
-    #: SketchUp's Ctrl on the Protractor: with guides OFF it only reports
+    #: Ctrl on the Protractor: with guides OFF it only reports
     #: the angle instead of leaving a guide behind (issue #29, @pacaeiro).
-    #: Reset when the tool is picked up, as SketchUp does.
+    #: Reset when the tool is picked up, the classic behaviour.
     _guides = True
 
     @property
@@ -316,7 +352,7 @@ class ProtractorTool(ProtractorBase):
         return self._guides
 
     def status_clause(self) -> str:
-        """Kept on screen while the tool is active, as SketchUp does. Two
+        """Kept on screen while the tool is active. Two
         modes here: the Protractor cannot drop a guide POINT."""
         from core.i18n import tr as _tr
         guia, medir = _tr("guide"), _tr("measure")
@@ -325,6 +361,7 @@ class ProtractorTool(ProtractorBase):
 
     name = "Protractor"
     shortcut = "Shift+H"
+    description = "Measure angles and place guide lines at an angle."
     vcb_label = "Angle"
     accepts_angle_ratio = True  # VCB "3:12" (rise:run) arrives as degrees
 
@@ -334,14 +371,15 @@ class ProtractorTool(ProtractorBase):
 
     # ---- Lifecycle ----------------------------------------------------------
     def on_activate(self, viewport) -> None:
-        # Picking the tool up starts in guide mode, as SketchUp does — its +
+        # Picking the tool up starts in guide mode, the classic behaviour —
+        # its +
         # «appears or disappears depending on whether you tapped Ctrl SINCE
         # YOU PICKED UP THE TOOL». Ours stayed off for good, so after one
         # measure-only reading the guides looked broken (Marco, 2026-09-17).
         self._guides = True
         self._reset()
         self._last = None
-        # Picking the tool up again (Shift+H while it is held) is SketchUp's
+        # Picking the tool up again (Shift+H while it is held) is the usual
         # "start over", and the arrow-key plane lock is part of what starts
         # over: it stayed on across the reload (issue #48, @pacaeiro:
         # «define a Hard Axis (Z) and Reload the command — the Hard Axis
@@ -367,7 +405,8 @@ class ProtractorTool(ProtractorBase):
                 return
             self.ref_point = ctx.world
             return
-        deg = self._display_deg(ctx.world)
+        self._note_snap(ctx)
+        deg = self._commit_deg(ctx.world)
         if deg is not None:
             self._commit(ctx.viewport, deg)
 
@@ -376,6 +415,7 @@ class ProtractorTool(ProtractorBase):
         self._track_axis_drag(ctx.viewport)
         self._infer_plane(ctx)
         self._update_screen_metrics(ctx)
+        self._note_snap(ctx)
         ctx.viewport.update()
 
     def on_release(self, viewport) -> None:
@@ -398,7 +438,7 @@ class ProtractorTool(ProtractorBase):
             self._commit(viewport, sign * abs(value))
             return True
         if self._last is not None:
-            # Hot retype (SketchUp): re-aim the guide just created. A typed
+            # Hot retype: re-aim the guide just created. A typed
             # negative flips to the other side of the base.
             last = self._last
             if last["guide"] not in viewport.scene.guides:
@@ -435,13 +475,17 @@ class ProtractorTool(ProtractorBase):
         segments.append((self.start_point, self.hover_point))
         if self.ref_point is not None:
             segments.append((self.start_point, self.ref_point))
-            deg = self._display_deg(self.hover_point)
-            if deg is not None:
-                d = self._direction_at(deg)
-                # Preview of the future guide, long enough to read as a line.
-                segments.append((self.start_point - d * 50.0,
-                                 self.start_point + d * 50.0))
         return segments
+
+    def guide_preview_lines(self):
+        """The angled guide the next click leaves, through the vertex."""
+        if (not self._guides or self.start_point is None
+                or self.ref_point is None or self.hover_point is None):
+            return []
+        deg = self._commit_deg(self.hover_point)
+        if deg is None:
+            return []
+        return [Guide(self.start_point, self._direction_at(deg)).segment()]
 
     def value_label(self):
         if self.ref_point is None or self.hover_point is None:
@@ -467,7 +511,7 @@ class ProtractorTool(ProtractorBase):
             return
         guide = Guide(self.start_point, d)
         viewport.history.execute(AddGuideCommand(guide))
-        # SketchUp: the tool resets for the next measurement, but the angle
+        # The tool resets for the next measurement, but the angle
         # stays hot — typing a value + Enter re-aims this guide until the
         # next click or tool change.
         u, v = plane_axes(self._axis())

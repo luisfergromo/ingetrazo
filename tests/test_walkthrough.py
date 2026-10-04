@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""SketchUp's Position Camera / Look Around / Walk (tools/walkthrough.py) —
-Rafael's «pasitos» for looking at interiors (2026-09-16, 13:00), built to
-help.sketchup.com «Walking through a Model» and to Marco's recording of
-SketchUp's status bar.
+"""Position Camera / Look Around / Walk (tools/walkthrough.py) — Rafael's
+«pasitos» for looking at interiors (2026-09-16, 13:00), built to the classic
+«Walking through a Model» documentation and to Marco's recording of the
+original status bar.
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def test_position_camera_click_stands_the_eye_above_the_point():
         assert (eye - QVector3D(3, 2, 1.68)).length() < 1e-4
         assert abs(vp.camera.forward().z()) < 1e-6   # looking level
         assert vp.camera.perspective                 # …becomes a walk
-        # SketchUp hands over to Look Around.
+        # the classic tool hands over to Look Around.
         assert isinstance(vp.active_tool, LookAroundTool)
     finally:
         win._saved_version = vp.scene.version
@@ -268,7 +268,7 @@ def test_the_three_tools_are_in_the_camera_menu_and_the_walkthrough_toolbar():
     try:
         assert "walkthrough" in win.toolbars
         keys = [a.text() for a in win.toolbars["walkthrough"].actions()]
-        assert keys == ["Position Camera", "Walk", "Look Around"]
+        assert keys == ["Position Camera", "Walk", "Look Around", "First Person"]
         camera_menu = [m for m in win.menuBar().findChildren(type(win.menuBar().actions()[0].menu()))
                        if m.title() == "Camera"][0]
         texts = [a.text() for a in camera_menu.actions()]

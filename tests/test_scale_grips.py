@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""The Scale tool's grip box, against SketchUp's documented behaviour: 26
+"""The Scale tool's grip box, against the classic documented behaviour: 26
 grips on a 3D selection (8 corners scale uniformly, 12 edge midpoints scale
 two axes, 6 face centres scale one), 8 on a flat one; the anchor is the
 opposite side or — About Center — the middle; typed values read as factors,
@@ -46,7 +46,7 @@ def _tool_with_box(w=4.0, d=3.0, h=2.0):
 
 
 # ---- Grips ------------------------------------------------------------------
-def test_a_3d_selection_gets_sketchups_26_grips():
+def test_a_3d_selection_gets_the_classic_26_grips():
     tool, _ = _tool_with_box()
     kinds = {}
     for g in tool._grips:
@@ -219,7 +219,7 @@ def test_hot_retype_redoes_the_last_scale_at_the_new_factor():
 
 
 # ---- Captions ---------------------------------------------------------------
-def test_vcb_captions_follow_the_axes_like_sketchup():
+def test_vcb_captions_follow_the_axes():
     tool, _ = _tool_with_box()
     assert tool.vcb_caption() == "Scale"
     tool._grip = next(g for g in tool._grips if g.params == (1.0, 0.5, 0.5))
@@ -228,3 +228,39 @@ def test_vcb_captions_follow_the_axes_like_sketchup():
     assert tool.vcb_caption() == "Red, Green Scale"
     tool._grip = next(g for g in tool._grips if g.params == (1.0, 1.0, 1.0))
     assert tool.vcb_caption() == "Scale"      # corners scale uniformly
+
+
+def test_a_long_drag_down_and_back_scales_every_vertex():
+    """A user's video (25-09): a rounded box scaled by dragging a corner
+    down near 0.04 and back, over and over, came out torn on release. The
+    preview chained relative steps in float32; undoing them left some
+    vertices a hair off the cell the commit looks them up by, so those were
+    never scaled. The preview now always starts from the originals."""
+    import random
+    scene = Scene()
+    vp = _Stub(scene)
+    # a fine strip of faces, away from the origin, like a fillet
+    faces = []
+    for i in range(30):
+        x0 = 3.1234 + i * 0.0137
+        faces.append(scene.mesh.add_face([
+            V(x0, 1.777, 0.7), V(x0 + 0.0137, 1.777, 0.7),
+            V(x0 + 0.0137, 1.9, 0.9), V(x0, 1.9, 0.9)]))
+    scene.selection.update(faces)
+    tool = ScaleTool()
+    tool.on_activate(vp)
+    grip = max(tool._grips, key=lambda g: g.params)          # a corner
+    before = {id(v): QVector3D(v.position) for v in scene.mesh.vertices}
+    anchor = None
+    tool._grab(vp, grip, (0.0, 0.0))
+    anchor = QVector3D(tool._anchor)
+    rnd = random.Random(1)
+    for _ in range(300):
+        f = rnd.choice([0.04, 0.09, 0.2, 0.56, 0.93, 1.11, 1.2, 0.15])
+        tool._apply_preview(vp, (f, f, f))
+    tool._apply_preview(vp, (0.5, 0.5, 0.5))
+    tool._commit(vp, (0.5, 0.5, 0.5))
+    for v in scene.mesh.vertices:
+        want = anchor + (before[id(v)] - anchor) * 0.5
+        assert (v.position - want).length() < 1e-5
+    assert len(scene.mesh.vertices) == len(before)

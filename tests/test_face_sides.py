@@ -4,7 +4,7 @@
 
 «Si a una cara le aplico un color o textura, también se aplica a su revés,
 lo cual no debería; solo en el caso de una malla o cristal o agua» (Marco,
-2026-09-11). Es la regla de SketchUp: el cubo pinta el lado bajo el cursor,
+2026-09-11). Es la regla habitual: el cubo pinta el lado bajo el cursor,
 el otro conserva el color de reverso del estilo, y un material translúcido
 se ve igual por los dos lados. ``attrs["back"]``: ausente = reverso por
 defecto, ``True`` = cara de dos lados (el reverso copia al frente), dict =
@@ -81,6 +81,7 @@ def _estado_limpio():
     PaintTool.current_texture_plane = None
     PaintTool.current_opacity = None
     PaintTool.current_color = (0.80, 0.45, 0.30)
+    PaintTool.current_is_default = False
 
 
 # ---- la regla ---------------------------------------------------------------
@@ -347,9 +348,11 @@ def test_una_instancia_espejada_conserva_el_frente_de_sus_caras():
     """«Hice mirror a un componente y sus texturas desaparecen» (Marco,
     2026-09-11): un espejo da la vuelta al giro de cada triángulo, GL
     llamaba reverso al lado pintado y el tinte del reverso lo tapaba. El
-    trozo de la instancia intercambia dos esquinas por triángulo, y una
-    instancia espejada no va por el camino instanciado (que dibuja los
-    triángulos del prototipo tal cual)."""
+    trozo de la instancia intercambia dos esquinas por triángulo. Desde la
+    #158 una instancia espejada SÍ va por el camino instanciado, en un lote
+    con el frente en sentido horario (``_front_face``): 6 203 espejos en un
+    modelo industrial eran 4,2 millones de caras horneadas una a una. El
+    trozo horneado (selección, siluetas) sigue con el giro corregido."""
     import numpy as np
     from PySide6.QtGui import QMatrix4x4
     from core.group import Group
@@ -369,7 +372,7 @@ def test_una_instancia_espejada_conserva_el_frente_de_sus_caras():
     for name in ("_proto_base_chunk", "_normal_of", "_tris_of", "_area_of",
                  "_newell_of", "_instanced_eligible"):
         setattr(vp, name, getattr(Viewport, name).__get__(vp))
-    assert vp._instanced_eligible(inst) is False
+    assert vp._instanced_eligible(inst) is True
     ch = vp._group_chunk(inst)
     tris = np.frombuffer(ch["vcol"], np.float32).reshape(-1, 3, 6)[:, :, :3]
     for t in tris:
@@ -378,3 +381,42 @@ def test_una_instancia_espejada_conserva_el_frente_de_sus_caras():
     db = np.frombuffer(ch["dback"], np.float32).reshape(-1, 3, 3)
     for t in db:
         assert np.cross(t[1] - t[0], t[2] - t[0])[2] > 0
+
+
+# ---- @pacaeiro, #47 punto 2: el material «por defecto» (sin material)
+
+def test_el_cuentagotas_toma_el_sin_material_y_pintarlo_lo_quita():
+    vp = _Visor()
+    limpia = _quad(vp.scene.mesh)
+    roja = vp.scene.mesh.add_face([V(10, 0), V(14, 0), V(14, 4), V(10, 4)])
+    roja.attrs.update(color=[1.0, 0.0, 0.0], mat="Ladrillo", opacity=0.5)
+    _click(vp, limpia, Qt.AltModifier)                # muestrea «sin material»
+    assert PaintTool.current_is_default is True
+    _click(vp, roja)                                  # y lo pinta: se lo quita
+    assert not {"color", "texture", "mat", "opacity"} & set(roja.attrs)
+    vp.history.undo()
+    assert roja.attrs["color"] == [1.0, 0.0, 0.0] and roja.attrs["mat"] == "Ladrillo"
+    _click(vp, roja, Qt.AltModifier)                  # un material de verdad
+    assert PaintTool.current_is_default is False
+
+
+def test_sin_material_en_el_reves_lo_devuelve_al_por_defecto():
+    vp = _Visor(desde_abajo=True)
+    f = _quad(vp.scene.mesh)
+    f.attrs["back"] = {"color": [0.0, 0.0, 1.0]}
+    PaintTool.current_is_default = True
+    _click(vp, f)
+    assert "back" not in f.attrs
+
+
+def test_con_el_cuentagotas_en_el_puntero_el_clic_muestrea():
+    """Marco, 2026-09-23: con Alt sostenido «a veces pinta». Si el puntero
+    muestra el cuentagotas, el clic toma el material aunque el evento del
+    ratón llegue sin Alt en sus modificadores."""
+    vp = _Visor()
+    f = _quad(vp.scene.mesh)
+    f.attrs["color"] = [0.0, 1.0, 0.0]
+    vp._alt_down = True                     # el puntero ya es cuentagotas
+    _click(vp, f)                           # evento sin modificadores
+    assert PaintTool.current_color == (0.0, 1.0, 0.0)
+    assert f.attrs["color"] == [0.0, 1.0, 0.0]   # no pintó

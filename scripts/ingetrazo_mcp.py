@@ -23,20 +23,54 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 PORT = int(os.environ.get("INGETRAZO_AI_PORT", 4763))
+#: Where the bridge is. It only ever listens on the app machine's loopback
+#: (no authentication, and run_python runs code in the app); a client in
+#: a container or on another machine reaches it through a tunnel the user
+#: sets up, and names the tunnel's end here (issue #130).
+HOST = os.environ.get("INGETRAZO_AI_HOST", "").strip() or "127.0.0.1"
 PROTOCOL = "2024-11-05"
+
+# The recipe book the model needs, from the app's own copy — the SAME text
+# the in-app assistant teaches (core/ai_recipes.py explains what its absence
+# cost). This process is stdlib-only and starts from four layouts (checkout,
+# PyInstaller bundle, AppImage, Flatpak), so the app root goes on the path
+# first; if that import ever fails the server still answers, with the short
+# reference it can state truthfully.
+_APP_ROOT = str(Path(__file__).resolve().parents[1])
+sys.path.insert(0, _APP_ROOT)
+try:
+    from core.ai_recipes import reference as _reference
+    REFERENCE = _reference("llamada")
+except ImportError:                             # pragma: no cover - packaging
+    REFERENCE = ("IngeTrazo: Z arriba, unidades en METROS. En el scope: "
+                 "scene, mesh, selection, groups, layers, viewport, "
+                 "QVector3D, Mesh, Group, Edge, Face, bim. Recetario: "
+                 "revolve / extrude / prism / wall / house.")
+finally:
+    if sys.path and sys.path[0] == _APP_ROOT:   # leave the process as found
+        del sys.path[0]
+
+#: MCP's ``initialize`` hands this to the client before any tool is listed —
+#: the stance, with the recipes themselves on ``run_python`` where every
+#: client is sure to put them in front of the model.
+INSTRUCTIONS = (
+    "Estas herramientas operan el documento ABIERTO de IngeTrazo, en vivo: "
+    "lo que escribas aparece en la pantalla del usuario y entra en su "
+    "historial de deshacer.\n" + REFERENCE + "\nEmpieza por query_model "
+    "para ver qué hay, construye con run_python y MIRA el resultado con "
+    "screenshot.")
 
 TOOLS = [
     {
         "name": "run_python",
         "description": (
-            "Execute Python against the LIVE IngeTrazo document. In scope: "
-            "scene, mesh, selection, groups, layers, viewport, QVector3D, "
-            "Mesh, Group, Edge, Face, bim. Draw with mesh.add_face([...]) / "
-            "mesh.add_edge(a, b); every call is ONE undo step and rolls "
-            "back whole on error. Returns stdout/stderr. Prefer several "
-            "small steps with screenshots over one huge script."),
+            "Execute Python against the LIVE IngeTrazo document (Z-up, "
+            "metres). Returns stdout/stderr. The reference below is "
+            "everything you need — read it instead of exploring the API.\n\n"
+            + REFERENCE),
         "inputSchema": {
             "type": "object",
             "properties": {"code": {"type": "string"}},
@@ -82,7 +116,7 @@ def _bridge(tool: str, args: dict) -> dict:
         if _sock is None:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(180.0)
-            s.connect(("127.0.0.1", PORT))
+            s.connect((HOST, PORT))
             _sock = s
         _req_id += 1
         try:
@@ -115,9 +149,9 @@ def _call(name: str, args: dict) -> dict:
         reply = _bridge(name, args)
     except OSError as exc:
         return _tool_result(
-            "Cannot reach IngeTrazo's AI bridge on 127.0.0.1:%d (%s). "
-            "In IngeTrazo: Extensiones > AI Bridge (MCP) to start it."
-            % (PORT, exc), is_error=True)
+            "Cannot reach IngeTrazo's AI bridge on %s:%d (%s). "
+            "In IngeTrazo: the AI tab of the side tray > Start bridge (or Extensions > AI Bridge (MCP))."
+            % (HOST, PORT, exc), is_error=True)
     if not reply.get("ok"):
         return _tool_result(str(reply.get("error")), is_error=True)
     result = reply.get("result") or {}
@@ -154,6 +188,7 @@ def handle(msg: dict) -> dict | None:
             "protocolVersion": PROTOCOL,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "ingetrazo", "version": "1.0.0"},
+            "instructions": INSTRUCTIONS,
         }}
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": msg_id,

@@ -1,6 +1,6 @@
 """IngeTrazo entry point.
 
-Free 3D modeler for architecture, civil engineering, and 3D printing.
+Free 3D modeler for architecture, engineering and 3D design.
 Part of the IngePresupuestos ecosystem (modeling → quantity takeoff → budget).
 
 Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
@@ -9,6 +9,7 @@ Licensed under GPL-3.0-or-later. See LICENSE.
 from __future__ import annotations
 
 import faulthandler
+import os
 import sys
 from pathlib import Path
 
@@ -33,49 +34,12 @@ elif sys.stderr is not None:
 # if the ghost bothers you: run with QT_QPA_PLATFORM=xcb. Re-test the ghost
 # when Mutter/Qt update; no app-side workaround cured it (see CLAUDE.md).
 
-from PySide6.QtCore import QLocale, QSettings, Qt
-from PySide6.QtGui import QColor, QPalette, QSurfaceFormat
+from PySide6.QtCore import (QEvent, QLibraryInfo, QLocale, QSettings, Qt,
+                            QTranslator)
+from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from core import i18n
-
-
-def _apply_dark_theme(app: QApplication) -> None:
-    """Force dark UI chrome regardless of the desktop theme.
-
-    The 3D viewport is dark by design; light menus and title bar clash with
-    it. ``setColorScheme`` drives the platform pieces (Wayland client-side
-    title bar, native menus); the Fusion style + palette cover every widget
-    so the look does not depend on whatever desktop theme is installed
-    (matches IngeCAD's main.py — keep both in sync).
-    """
-    app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
-    app.setStyle("Fusion")
-
-    window = QColor(45, 45, 48)
-    base = QColor(37, 37, 40)
-    text = QColor(224, 224, 224)
-    disabled = QColor(128, 128, 128)
-    highlight = QColor(42, 93, 143)
-
-    p = QPalette()
-    p.setColor(QPalette.Window, window)
-    p.setColor(QPalette.WindowText, text)
-    p.setColor(QPalette.Base, base)
-    p.setColor(QPalette.AlternateBase, window)
-    p.setColor(QPalette.Text, text)
-    p.setColor(QPalette.PlaceholderText, disabled)
-    p.setColor(QPalette.Button, window)
-    p.setColor(QPalette.ButtonText, text)
-    p.setColor(QPalette.BrightText, QColor(255, 96, 96))
-    p.setColor(QPalette.ToolTipBase, QColor(58, 58, 61))
-    p.setColor(QPalette.ToolTipText, text)
-    p.setColor(QPalette.Highlight, highlight)
-    p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
-    p.setColor(QPalette.Link, QColor(74, 163, 224))
-    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.HighlightedText):
-        p.setColor(QPalette.Disabled, role, disabled)
-    app.setPalette(p)
 
 
 def _init_language() -> None:
@@ -97,6 +61,56 @@ def _init_language() -> None:
         else:
             saved = "en"
     i18n.set_language(str(saved))
+    _install_qt_translator(str(saved))
+
+
+class _ButtonsOnlyTranslator(QTranslator):
+    """Qt's own catalog, limited to the standard button texts.
+
+    ``qtbase_<lang>.qm`` also names the keys — «Control+Mayúsculas+Re Pág»
+    for Ctrl+Shift+PgUp in menus, tooltips and the shortcut editor — and
+    the shortcuts stay in English on purpose. The button texts live in
+    these contexts; everything else is left untranslated."""
+
+    _CONTEXTS = frozenset({"QPlatformTheme", "QMessageBox",
+                           "QDialogButtonBox"})
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._qt = QTranslator()
+
+    def load_qt(self, lang: str) -> bool:
+        folder = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        return self._qt.load(f"qtbase_{lang.replace('-', '_')}", folder)
+
+    def isEmpty(self) -> bool:
+        return self._qt.isEmpty()
+
+    def translate(self, context, source, disambiguation=None, n=-1):
+        if context not in self._CONTEXTS:
+            return None                   # not ours: Qt keeps its text
+        return self._qt.translate(context, source, disambiguation, n)
+
+
+#: Kept alive for the whole session: Qt drops a translator that is freed.
+_qt_translator: QTranslator | None = None
+
+
+def _install_qt_translator(lang: str) -> None:
+    """Let Qt name its standard buttons in ``lang`` too.
+
+    Our catalog only covers ``tr()`` strings; the standard buttons of
+    QMessageBox and QDialogButtonBox (OK, Cancel, Yes, No…) come from
+    Qt's own ``qtbase_<lang>.qm``, which PySide6 ships. Without it they
+    stayed in English under every language. A missing file just leaves
+    them in English, as before."""
+    global _qt_translator
+    if lang == "en":
+        return
+    translator = _ButtonsOnlyTranslator()
+    if translator.load_qt(lang):
+        QApplication.installTranslator(translator)
+        _qt_translator = translator
 
 from views.main_window import MainWindow
 
@@ -126,8 +140,8 @@ def _open_document_in(window, doc: "Path") -> None:
     the window must be visible, not frozen pre-show). Shared by the initial
     launch and the single-instance second-launch handler."""
     ext = doc.suffix.lower()
-    if ext == ".igz":
-        window.open_path(doc)
+    if ext == ".igz" or ext in getattr(window, "file_openers", {}):
+        window.open_path(doc)       # an extension's own type goes to its opener
     elif ext == ".skp":
         from PySide6.QtCore import QTimer
 
@@ -136,6 +150,37 @@ def _open_document_in(window, doc: "Path") -> None:
                 window._on_zoom_extents()
 
         QTimer.singleShot(0, _open_skp)
+
+
+class _App(QApplication):
+    """QApplication subclass so macOS's file-open Apple Event reaches the
+    same code path as the argv-based association used on Linux/Windows.
+
+    Double-clicking an associated file on Linux/Windows hands the path as
+    plain ``argv[1]`` (see the single-instance block in ``main()``); macOS
+    never does that — Launch Services always starts the app with a bare
+    argv and delivers the path afterwards as a ``QFileOpenEvent``
+    (``QEvent.FileOpen``, Qt's wrapper for the OS's ``kAEOpenDocuments``
+    Apple Event). Without this override a macOS double-click on a ``.igz``
+    silently opened a blank "Untitled" window — the document never arrived.
+    """
+
+    def __init__(self, argv: list[str]) -> None:
+        super().__init__(argv)
+        self.open_window = None            # set once MainWindow exists
+        self.pending_open_path: Path | None = None
+
+    def event(self, e) -> bool:
+        if e.type() == QEvent.Type.FileOpen:
+            path = Path(e.file())
+            if self.open_window is not None:
+                _open_document_in(self.open_window, path)
+            else:
+                # Arrived before MainWindow exists — a cold macOS launch can
+                # deliver it this early. main() flushes this once it does.
+                self.pending_open_path = path
+            return True
+        return super().event(e)
 
 
 def _self_check() -> int:
@@ -171,26 +216,74 @@ def _self_check() -> int:
         if not ok:
             problems.append(label)
 
-    # The .skp writer builds every file on top of openskp's bundled blank
-    # (``_scaffold/blank_v17.skp``, package data PyInstaller doesn't collect
-    # by itself): a bundle without it starts fine and dies on Export ▸
-    # SketchUp with "[Errno 2]" — 0.4.1 on Windows shipped exactly that.
+    # DWG import goes through LibreDWG's dwg2dxf (#101). Every package
+    # carries it now; a packaged build without it is a broken package.
+    from formats.dwg_bridge import find_dwg2dxf
+    dwg = find_dwg2dxf()
+    print(f"  DWG converter  : {'found' if dwg else 'MISSING'}  {dwg or ''}")
+    if dwg is None and is_frozen():
+        problems.append("DWG converter")
+
+    # ``ingetrazo --mcp`` runs scripts/ingetrazo_mcp.py by path, and that
+    # server reads its recipe book from core.ai_recipes. The Flatpak of
+    # 0.4.9 shipped without scripts/ at all: the app ran, and the MCP door
+    # was simply dead — the same family as the skp scaffold below. A recipe
+    # book that fails to import is worse than missing, because the server
+    # still answers and the model goes back to probing the API by hand.
+    script = root / "scripts" / "ingetrazo_mcp.py"
+    ok = script.is_file()
+    print(f"  MCP server     : {'found' if ok else 'MISSING'}  {script}")
+    if not ok:
+        problems.append("MCP server")
+    try:
+        from core.ai_recipes import reference
+
+        text = reference()
+        ok = "revolve(" in text and "house(" in text
+        where = f"{len(text)} chars"
+    except Exception as exc:  # noqa: BLE001 - unimportable in this bundle
+        ok, where = False, f"({exc})"
+    print(f"  AI recipe book : {'found' if ok else 'MISSING'}  {where}")
+    if not ok:
+        problems.append("AI recipe book")
+
+    # The bundled extensions are loaded by path, so the package builder
+    # never sees what they import. 0.5.6 left views.fold_section out and the
+    # AI assistant, the MCP bridge and Render with Blender showed «error
+    # loading» on Windows (#208): import each one here, as the app would.
+    import importlib.util
+    broken = []
+    for plugin in sorted((root / "plugins").glob("*.py")):
+        if plugin.name.startswith("_"):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"_check_plugin_{plugin.stem}", plugin)
+            spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        except Exception as exc:  # noqa: BLE001 - any failure is the report
+            broken.append(f"{plugin.stem} ({exc})")
+    print(f"  extensions     : {'all load' if not broken else 'BROKEN'}"
+          f"  {'; '.join(broken)}")
+    if broken:
+        problems.append("extensions")
+
+    # openskp ships a blank .skp template that its writer builds files on
+    # top of. IngeTrazo does not distribute it and has no .skp export: a
+    # bundle that still carries it is a packaging regression.
     try:
         from importlib import resources
 
         scaffold = resources.files("openskp") / "_scaffold" / "blank_v17.skp"
-        ok = scaffold.is_file()
-        where = str(scaffold)
-    except Exception as exc:  # openskp itself missing or unimportable
-        ok, where = False, f"({exc})"
-    print(f"  skp scaffold   : {'found' if ok else 'MISSING'}  {where}")
-    if not ok:
-        problems.append("skp scaffold")
+        shipped = scaffold.is_file()
+    except Exception:  # openskp itself missing: reported below
+        shipped = False
+    print(f"  skp template   : {'SHIPPED (remove it)' if shipped else 'not shipped'}")
+    if shipped and getattr(sys, "frozen", False):
+        problems.append(".skp writer template shipped")
 
     # openskp 1.3.0 triangulates with mapbox_earcut, a NATIVE extension that
     # ``import openskp`` needs before it will load at all. Reported on its
-    # own line: without it the scaffold probe above fails too, and its
-    # message would blame the wrong thing.
+    # own line.
     try:
         import mapbox_earcut  # noqa: F401
         ok, where = True, getattr(mapbox_earcut, "__file__", "?")
@@ -200,12 +293,28 @@ def _self_check() -> int:
     if not ok:
         problems.append("mapbox_earcut")
 
-    # The .skp fallback converter is optional (user-installed, runs under
-    # Wine); report presence without failing on absence.
-    wine = shutil.which("wine")
-    skp2dae = Path.home() / ".local" / "share" / "skp2dae" / "skp2dae.exe"
-    print(f"  wine (optional): {wine or 'not installed'}")
-    print(f"  skp2dae (opt.) : {skp2dae if skp2dae.is_file() else 'not installed'}")
+    # The Solid Tools' boolean kernel, another native extension imported
+    # only when a tool runs — a bundle without it fails at the first click.
+    try:
+        import manifold3d  # noqa: F401
+        ok, where = True, getattr(manifold3d, "__file__", "?")
+    except Exception as exc:  # noqa: BLE001
+        ok, where = False, f"({exc})"
+    print(f"  manifold3d     : {'found' if ok else 'MISSING'}  {where}")
+    if not ok:
+        problems.append("manifold3d")
+
+    # Qt's own catalog for the standard buttons (see _install_qt_translator).
+    # Optional: without the file the buttons stay in English, as before, so
+    # it is reported but never fails the check.
+    try:
+        from PySide6.QtCore import QLibraryInfo
+        folder = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))
+        have = sorted(f.stem[len("qtbase_"):] for f in folder.glob("qtbase_*.qm"))
+        where = f"{len(have)} languages, es {'yes' if 'es' in have else 'NO'}  {folder}"
+    except Exception as exc:  # noqa: BLE001
+        where = f"({exc})"
+    print(f"  Qt buttons (opt): {where}")
 
     if problems:
         print(f"\nNOT OK — missing: {', '.join(problems)}")
@@ -235,6 +344,10 @@ def _run_mcp_server() -> int:
 
 
 def main() -> int:
+    # HTTPS from Python (the AI assistant) must find a CA bundle: the macOS
+    # package asked for one where only the build machine had it (#198).
+    from core.tls import ensure_once
+    ensure_once()
     if "--check" in sys.argv[1:]:
         return _self_check()
     if "--mcp" in sys.argv[1:]:
@@ -265,7 +378,7 @@ def main() -> int:
     except Exception:
         platform_forced = None
     _configure_surface_format()
-    app = QApplication(sys.argv)
+    app = _App(sys.argv)
     app.setProperty("platform_forced", platform_forced)
     app.setApplicationName("IngeTrazo")
     app.setOrganizationName("IngeTrazo")
@@ -301,13 +414,22 @@ def main() -> int:
     # waits for the launched app to appear) never tied it to the launcher.
     import os as _os
     app.setDesktopFileName(_os.environ.get("FLATPAK_ID") or "ingetrazo")
-    _apply_dark_theme(app)
+    # Light or dark chrome: follows the desktop by default, live
+    # (Preferences ▸ General ▸ Theme pins one). See views/theme.py.
+    from views.theme import apply_theme
+    apply_theme(app)
     _init_language()
     # Long hints wrap into a box instead of a strip across the window.
     from views.tooltips import WrappingToolTips
     tooltips = WrappingToolTips(app)
     app.installEventFilter(tooltips)
     window = MainWindow()
+    # From here on, a FileOpen Apple Event (macOS double-click / Open With,
+    # or a second one while this instance is already the running app — see
+    # _App.event) opens straight into this window, no process handoff
+    # needed: unlike Linux/Windows, macOS delivers it to the ALREADY-RUNNING
+    # process instead of spawning a new one.
+    app.open_window = window
 
     # Single instance: if IngeTrazo is already running, hand the document to
     # that window and quit — so a second double-click opens the file in the
@@ -316,10 +438,21 @@ def main() -> int:
     # any socket trouble just launches a normal standalone instance.
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     _SOCKET = "ingetrazo-single-instance"
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    # File ▸ New Window starts a second IngeTrazo with --new-window: it must
+    # NOT hand over to the running one like a double-click does, or the
+    # new window never appears (issue #76).
+    new_window = "--new-window" in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--new-window"]
+    arg = args[0] if args else ""
+    if not arg and app.pending_open_path is not None:
+        # A cold macOS launch by double-click: no argv, the path arrived as
+        # the FileOpen event queued before `open_window` was set above.
+        arg = str(app.pending_open_path)
+        app.pending_open_path = None
     probe = QLocalSocket()
-    probe.connectToServer(_SOCKET)
-    if probe.waitForConnected(200):
+    if not new_window:
+        probe.connectToServer(_SOCKET)
+    if not new_window and probe.waitForConnected(200):
         probe.write((arg + "\n").encode("utf-8"))
         probe.flush()
         probe.waitForBytesWritten(300)
@@ -333,10 +466,14 @@ def main() -> int:
     # No responsive server — become one. A stale socket (crash / unresponsive
     # peer) is cleared by removeServer before listen; if even that fails we
     # run as a plain window with no server, still fully functional.
-    server = QLocalServer()
-    QLocalServer.removeServer(_SOCKET)
-    if not server.listen(_SOCKET):
-        server = None
+    # An extra window stays out of it: the first one keeps answering
+    # double-clicks, and this one must not tear down its socket.
+    server = None
+    if not new_window:
+        server = QLocalServer()
+        QLocalServer.removeServer(_SOCKET)
+        if not server.listen(_SOCKET):
+            server = None
 
     def _handle_second_launch():
         conn = server.nextPendingConnection()
@@ -406,5 +543,24 @@ def _offer_appimage_integration(window) -> None:
     QTimer.singleShot(600, ask)
 
 
+def _exit_now(code) -> None:
+    """Leave without tearing the model down object by object. Everything
+    that must reach the disk has by now: the window closed, the document
+    was saved or discarded, and the settings are synced here. What is left
+    is freeing millions of Python objects one at a time, which on a big
+    model kept the process — and its gigabytes — alive for a minute after
+    the window was gone (issue #158, @pacaeiro: 21 406 groups, 6.7 GB)."""
+    import logging
+    from PySide6.QtCore import QSettings
+    QSettings().sync()
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code if isinstance(code, int) else 0)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit_now(main())

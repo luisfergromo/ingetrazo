@@ -26,6 +26,8 @@ from tools.base import Tool
 class HelloTool(Tool):
     name = "Hello"
     shortcut = None      # or "Ctrl+Shift+H" — silently dropped if taken
+    # Optional: what it does, in the status bar and the F3 search.
+    description = "Say hello in the status bar."
 
     def on_activate(self, viewport):
         viewport.flash_status("Hello from a plugin!", 3000)
@@ -113,6 +115,160 @@ touch the document off the main thread. Relay results with a
 receiver runs on the WRONG thread (both bugs were hunted in these very
 plugins; the details are in the AI plugins' comments).
 
+## Beyond tools: `setup(app)`
+
+A plugin that needs more than a menu entry defines a module-level
+`setup(app)`. It is called once, when the main window is built, with an
+`ExtensionApp` (`views/extension_api.py`, `API_VERSION` 2). A plugin may
+have tools, a `setup`, or both; if `setup` raises, the plugin shows as a
+load error and the application opens regardless.
+
+```python
+def setup(app):
+    app.key                       # this plugin's name (its file stem)
+    app.window, app.viewport, app.scene
+
+    # Data IN THE DOCUMENT: one JSON-safe value per plugin, saved in the
+    # .igz, reset by New/Open. Each set is one undo step.
+    data = app.document_data(default={})
+    app.set_document_data({"levels": [...]})
+    app.on_document_changed(refresh)      # edits, undo, New, Open
+
+    # A tab in the side tray, beside Properties / BIM / Terrain. It goes
+    # back where the user left it and is listed in Window ▸ Panels (the
+    # user may hide it there); `name` tells apart several panels of one
+    # extension, `panel=` puts several extensions in ONE tab.
+    dock = app.add_panel("Levels", my_widget)
+    app.add_panel("Levels — help", help_widget, name="help")
+    app.add_panel("AI", chat, panel="ai", stretch=1)
+    app.show_panel(dock)                  # to the front, shown again if hidden
+
+    # Several commands? A submenu of your own: Extensions ▸ Windowizer ▸ …
+    sub = app.add_menu("Windowizer")
+    sub.addAction("Edit window…", edit)
+
+    # Entries in the viewport's right-click menu, after the selection's own
+    # (open dialogs from them with QTimer.singleShot(0, …)):
+    app.add_context_menu(lambda menu, selection: ...)
+
+    # Parameters of YOUR container groups (a parametric window, a stair):
+    # group.ext[app.key] — kept with copies, saved in the .igz, and apart
+    # from group.ifc, which the BIM panel replaces when it retags.
+    group.ext = {app.key: {"rows": 2, "cols": 3}}
+
+    # An entry in the Extensions menu (a shortcut already taken is left off;
+    # `tip` says what it does, in the status bar and in F3).
+    app.add_menu_action("Levels…", lambda: app.show_panel(dock), "Ctrl+Shift+L",
+                        tip="Show the levels of the building.")
+
+    # Another .igz as ONE component, with no file dialog: it follows the
+    # mouse and a click drops it, or `at=` puts its origin at a point now
+    # (one undo step). Returns the component; None = no geometry.
+    app.import_igz("/path/to/bench.igz")
+    comp = app.import_igz("/path/to/bench.igz", at=(4.0, 2.0, 0.0))
+
+    # Drawn with a QPainter over every frame, whatever the active tool;
+    # world points (metres) to pixels, thousands at a time:
+    app.add_overlay(lambda viewport, painter: ...)
+    px, py, in_front = app.world_to_pixels(points_n_by_3)
+
+    # Your own items, selectable with the Select tool and deleted with
+    # Supr (moving them comes later): `pick` says which item is under a
+    # pixel (asked before the model's geometry), `on_select(id)` hears the
+    # pick and `on_select(None)` its release, `delete(id)` removes it —
+    # through set_document_data, so it is one undo step.
+    app.add_pickable(pick=lambda viewport, px, py: None,
+                     on_select=lambda item: ..., delete=lambda item: ...)
+
+    # Offered the snap engine's answer on every hover and click; return a
+    # core.snap.SnapResult (its `label` is the ScreenTip) or None.
+    app.add_snap_provider(lambda viewport, snap, px, py: None)
+```
+
+Rules the host enforces: a snap provider never overrides a named point
+(endpoint, midpoint, centre, intersection, on edge…) — the user aimed at
+it; a provider that raises is logged and skipped, an overlay that raises
+is logged once and removed, never breaking the frame or the cursor; the
+painter state is saved and restored around every overlay; document data
+that is not JSON-safe is dropped on save rather than failing it.
+
+### Where your interface goes
+
+The side tray is one place, not the only one. Pick by how the user works
+with it:
+
+- **A tray tab** (`add_panel`) — for what stays open *while modelling* and
+  works on the viewport: placing things with a click, settings you tweak
+  and look at the model again. Render with Blender and Levels live here.
+  Keep it narrow-friendly: controls that shrink, sections that fold
+  (`views/fold_section.py`), no fixed widths.
+- **A dialog or a window of your own** (a `QDialog`, any Qt window, from a
+  tool or a menu entry) — for what is opened, used and closed, or needs
+  room: a report, a console, an image. Model Info, the Python Console and
+  the render's image viewer do this. Parent it to `app.window`, make it
+  non-modal unless it must block, and reuse one instance.
+- **Only a menu entry or a tool** — for one-shot commands.
+- **A workspace** (below) — when the extension has a document of its own
+  that replaces the model for a while.
+
+Nothing forces the tray: an extension may mix these (Render has its tab
+and opens the image in a window).
+
+### A document type of its own, and workspaces (API 2)
+
+**Provisional while IngeTrazo is 0.x:** this protocol (`add_file_opener`,
+`enter_workspace`/`leave_workspace`, the `workspace` object's shape) may
+still change in a later 0.x release without a major-version bump. Pin to
+a specific IngeTrazo version if you rely on it.
+
+A bigger extension may have documents of its own — a CAM job, say, with
+its drawing on the stock and its operations:
+
+```python
+def setup(app):
+    def open_job(path):
+        job = load(path)                  # an object with a Scene + History
+        return app.enter_workspace(job)   # shown instead of the model
+
+    # Files ending in .xyz are this extension's: opened from Open Recent,
+    # the command line or a double-click, they go to open_job(path) (True
+    # when it opened). The file dialog stays IngeTrazo's own; offer an
+    # «Open…» in the extension's panel. A core suffix (.igz, .dae, .skp,
+    # .dxf, .dwg, .obj, .stl, .glb), or one another extension already
+    # claimed, is refused — logged, not raised.
+    app.add_file_opener(".xyz", open_job)
+```
+
+`enter_workspace(workspace)` parks the model — its scene, undo history,
+camera, file and saved state wait untouched — and shows the workspace's
+`scene` with its `history`. Meanwhile New / Open / Save / Save As, the
+title, the unsaved-changes prompts and quitting go to the workspace, the
+model's autosave pauses, and only the tools in `workspace.allowed_tools`
+(`None` = all) can be picked. `leave_workspace()` brings the model back
+exactly as it was; opening an `.igz` does so first. The workspace object
+provides `scene`, `history`, `title()`, `is_dirty()`, `save()`,
+`save_as()` and `confirm_leave()` (True when it may go: saved, discarded,
+or nothing to lose); optionally `new()`, `open()`, `allowed_tools`,
+`camera` and `left()`, called once it is gone. Every swap is a document
+boundary for the viewport (`reset_document_caches()`), like New or Open.
+
+**Worked example:** `examples/extensions/niveles.py` — building levels
+(PB, PA…) kept in the document, a side panel to edit them, dashed guides in
+parallel elevations and sections, and the cursor snapping to their heights
+(«PA» on the tip). Idea and first version by José Castro Basso (FADU–UDELAR)
+for teaching architectural representation. It ships with the app but is not loaded:
+**Extensions ▸ Example extensions ▸ Niveles** copies it into your plugins
+folder (and removes it again); restart to load it. Features only some users need
+belong in extensions like this one, not in the core.
+
+**A second one:** `examples/extensions/windowizer.py` — parametric windows
+from faces drawn on a wall: one container group per window (`IfcWindow`,
+with a Frame and its Glass panes), the wall opened through or with reveals,
+Edit window rebuilding it in place from `group.ext`, and Erase window
+closing the wall again; all in a submenu (`add_menu`) and the right-click
+menu (`add_context_menu`), each command one undo step. A port of Rick
+Wilson's Windowizer 3 by Bane Andreev, an architect, written with AI help.
+
 ## Bundled reference plugins
 
 - `plugins/model_info.py` — Model Info dialog (geometry / materials /
@@ -123,17 +279,24 @@ plugins; the details are in the AI plugins' comments).
   diagnosis with viewport highlighting. A modeless, selection-driven
   plugin.
 - `plugins/ai_assistant.py` — the in-app AI assistant (Ctrl+Shift+A): a
-  multi-provider chat agent that models through `core.ai`. The reference
-  for dialogs with worker threads and per-provider settings.
+  multi-provider chat agent that models through `core.ai`, in the «AI»
+  tray tab. The reference for worker threads, per-provider settings and a
+  menu entry that brings a tab forward.
 - `plugins/ai_bridge.py` — the MCP bridge: a localhost TCP server that
-  lets an external agent (Claude Code/Desktop) drive the document. The
-  reference for socket servers and main-thread relays.
+  lets an external agent (Claude Code/Desktop) drive the document; a
+  section of the same «AI» tab (`panel="ai"`). The reference for socket
+  servers and main-thread relays.
+- `plugins/render_blender.py` — Render with Blender: a tray tab with
+  folding sections, lights placed with a click and drawn over the
+  viewport, document data, a child process, and the image in a window of
+  its own. The reference for a full panel extension.
 
 ## Roadmap
 
 - Tool registration — **done** (Extensions menu, this page).
 - Importer / exporter registration.
-- Side-panel registration.
+- Side-panel registration, document data, viewport overlays and snap
+  providers — **done** (`setup(app)`, above).
 - Plugin manifest (`plugin.toml`) for metadata and dependencies.
 - Plugin manager UI (install, enable, disable, update) — after the API
   stabilises; a package format would freeze the API too early (see the

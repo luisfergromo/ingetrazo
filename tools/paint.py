@@ -2,31 +2,33 @@
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """Paint (bucket) tool: assign a material colour to a face.
 
-Behavior (SketchUp's Paint Bucket, ``B``):
+Behavior (the classic Paint Bucket, ``B``):
 - Left click on a face: paint it with the tool's current colour. The colour
   lives in the face's ``attrs["color"]`` (the generic per-region attrs from
   A.3), so it survives push/pull and the plane rebuild.
 - If the clicked face is part of the current face selection, the whole
   selection is painted in one undoable step (paint many at once).
-- **Alt**+click samples the face's material into the current one (SketchUp's
-  eyedropper): image, applied size, rotation, translucency and the material
+- **Alt** switches to the eyedropper, the usual modern way: a tap
+  TOGGLES it and it stays until one face is sampled (then back to the
+  bucket) or Alt is tapped again; holding Alt and clicking samples too. The
+  sample takes the face's material into the current one: image, applied size, rotation, translucency and the material
   identity all travel, so the next click reproduces that material on another
   face. A face carrying an explicit world→UV map (an imported texture, or one
   positioned by hand) hands that map on only to faces on the SAME plane, where
   it keeps the pattern lined up; a face on another plane gets the material with
   its OWN planar projection at the same applied size. Copying the map across
-  planes is what SketchUp calls a *projected* texture, and doing it by default
+  planes is what is usually called a *projected* texture, and doing it by default
   degenerates: on a wall perpendicular to the sampled floor the ``v`` axis
   lands along the wall's normal and the image smears into stripes.
 - Works on loose geometry and group faces alike (``pick_face_any``).
 - **Paints the side you click.** A face has a front and a back, and
-  SketchUp paints exactly the side under the cursor: the front of a wall
+  the classic behaviour paints exactly the side under the cursor: the front of a wall
   takes the brick, its back keeps the style's default blue-grey. IngeTrazo
   used to show every paint on both sides («si a una cara le aplico un
   color o textura también se aplica a su revés, lo cual no debería» —
   Marco, 2026-09-11). The back's own material lives in ``attrs["back"]``
   (``SetFaceBackCommand``); a translucent front — glass, water, a raschel
-  mesh, a leaf cutout — reads on both sides anyway, as in SketchUp, and
+  mesh, a leaf cutout — reads on both sides anyway, and
   that rule lives in ``core.materials.back_is_default``.
 
 The current colour is class-level (shared across activations) and is set from
@@ -96,7 +98,7 @@ def _surface_commands(mesh, faces, seed, tex, plane) -> list | None:
 
 
 def _texture_commands(faces, tex, plane) -> list:
-    """Apply ``tex`` the way SketchUp's eyedropper does.
+    """Apply ``tex`` the way the classic eyedropper does.
 
     An explicit ``uvw`` is where the image sits IN THE WORLD; it only means
     the same thing on the plane it was fitted for. Faces on that plane keep
@@ -139,6 +141,7 @@ def clicked_back_side(viewport, face, group, x: float, y: float) -> bool:
 class PaintTool(Tool):
     name = "Paint"
     shortcut = "B"
+    description = "Click faces to paint them with the chosen material."
     uses_snap = False  # picks a face to paint; no snap markers
 
     # Shared current paint colour (RGB, 0..1), set from the toolbar swatch.
@@ -157,7 +160,7 @@ class PaintTool(Tool):
     # any previous opacity on the painted faces.
     current_opacity: float | None = None
     # Armed by the toolbar's eyedropper button: the NEXT click samples
-    # instead of painting, then disarms. SketchUp puts the same pipette
+    # instead of painting, then disarms. The pipette sits
     # beside the material — Alt works for people who know it, the button is
     # how you find it.
     sample_armed: bool = False
@@ -166,6 +169,11 @@ class PaintTool(Tool):
     # carries one. Only faces on that plane inherit the map; see the module
     # docstring. ``None`` = the texture has no map of its own to hand on.
     current_texture_plane: tuple | None = None
+    # The «Default» material (no material): the eyedropper picks it
+    # up from an unpainted side, the tray offers it, and painting with it
+    # REMOVES the paint (@pacaeiro, #47 point 2). While it is set the
+    # colour/texture fields above are ignored.
+    current_is_default: bool = False
 
     def on_activate(self, viewport) -> None:
         pass
@@ -185,7 +193,11 @@ class PaintTool(Tool):
         back_side = clicked_back_side(vp, face, group,
                                       ctx.screen.x(), ctx.screen.y())
 
-        if (ctx.modifiers & Qt.AltModifier) or PaintTool.sample_armed:
+        # The pointer is the promise: whenever it shows the eyedropper — Alt
+        # held, or tapped (a toggle) — the click samples.
+        alt = (bool(ctx.modifiers & Qt.AltModifier)
+               or bool(getattr(vp, "_alt_down", False)))
+        if alt or PaintTool.sample_armed:
             # Eyedropper: adopt the face's material (texture if it has one, else
             # colour) as the current paint material — identity included, so
             # sampling "Concreto visto" paints "Concreto visto". The side
@@ -202,6 +214,8 @@ class PaintTool(Tool):
                     src = back
                 elif back is not True:
                     src = {}
+            from core.materials import has_own_material
+            PaintTool.current_is_default = not has_own_material(src)
             tex = src.get("texture")
             if tex is not None:
                 PaintTool.current_texture = dict(tex)
@@ -238,8 +252,8 @@ class PaintTool(Tool):
             return
 
         # A face inside a container clicked from OUTSIDE it paints the
-        # container — the group or component instance as a whole (SketchUp;
-        # issue #47, @pacaeiro: «it's painting the picked face, instead of
+        # container — the group or component instance as a whole
+        # (issue #47, @pacaeiro: «it's painting the picked face, instead of
         # the whole group or component»). Its default faces take the paint;
         # faces painted themselves keep their own.
         if group is not None:
@@ -251,7 +265,9 @@ class PaintTool(Tool):
                 vp.history.execute(CompoundCommand([
                     SetFaceMaterialTagCommand(
                         [], mat.name if mat is not None else None, mat),
-                    SetGroupMaterialCommand(obj, self._current_as_material()),
+                    SetGroupMaterialCommand(
+                        obj, None if PaintTool.current_is_default
+                        else self._current_as_material()),
                 ]))
                 flash = getattr(vp, "flash_status", None)
                 if callable(flash):
@@ -263,11 +279,26 @@ class PaintTool(Tool):
 
         # Paint the clicked face — or, if it is part of the current face
         # selection, the whole selection. A face on a curved surface (cylinder
-        # side) paints the whole surface, SketchUp-style.
+        # side) paints the whole surface.
         sel_faces = [e for e in vp.scene.selection if isinstance(e, Face)]
         faces = (sel_faces if face in sel_faces
                  else vp.scene.mesh.surface_of(face))
         mat = PaintTool.current_material
+        if PaintTool.current_is_default:
+            # «No material»: the clicked side goes back to the default —
+            # nothing written, so a container's paint can dress it again.
+            if back_side:
+                cmd = SetFaceBackCommand(faces, None)
+            else:
+                cmd = CompoundCommand([
+                    SetFaceColorCommand(faces, None),
+                    SetFaceTextureCommand(faces, None),
+                    SetFaceOpacityCommand(faces, None),
+                    SetFaceMaterialTagCommand(faces, None, None),
+                ])
+            vp.history.execute(cmd)
+            vp.update()
+            return
         if back_side:
             # The back gets its own material and nothing else changes:
             # the front keeps what it had. The material still registers
@@ -285,7 +316,7 @@ class PaintTool(Tool):
         opacity = SetFaceOpacityCommand(faces, PaintTool.current_opacity)
         if PaintTool.current_texture is not None:
             # A curved surface gets the image wrapped around it from the
-            # clicked face (SketchUp) — the surface under the click, or the
+            # clicked face — the surface under the click, or the
             # part of the selection joined to it by soft edges (clicking a
             # surface with Select selects it whole, and Marco painted it
             # that way: every facet came out planar again, 2026-09-15);

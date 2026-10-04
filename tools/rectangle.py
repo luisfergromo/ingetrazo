@@ -35,6 +35,9 @@ def _plane_axes(normal: QVector3D) -> tuple[QVector3D, QVector3D]:
     rectangle on the top of a box still feels axis-aligned, and on a
     vertical wall ``u`` runs horizontally and ``v`` runs up/down.
     """
+    from core import axes
+    if not axes.is_world():
+        return axes.plane_axes(normal)    # inside a turned group (#44)
     n = normal.normalized()
     ref = QVector3D(1.0, 0.0, 0.0)
     u = ref - n * QVector3D.dotProduct(ref, n)
@@ -52,15 +55,19 @@ def _plane_axes(normal: QVector3D) -> tuple[QVector3D, QVector3D]:
 class RectangleTool(PlaneLock, Tool):
     name = "Rectangle"
     shortcut = "R"
+    description = "Draw a rectangle from two opposite corners."
     vcb_label = "Dimensions"
+    # Only a width AND a height mean something here, so "200,100" is two
+    # values (the list comma, #152), not the decimal 200.1.
+    vcb_comma_lists = True
     # Within this fraction of the longer side, the two sides count as equal and
-    # the rectangle snaps to a perfect square ("Cuadrado"), SketchUp-style.
+    # the rectangle snaps to a perfect square ("Cuadrado").
     SQUARE_TOL = 0.04
 
     def __init__(self) -> None:
         self.start_point: QVector3D | None = None
         self.hover_point: QVector3D | None = None
-        #: Ctrl toggles SketchUp's other way of drawing a rectangle: the
+        #: Ctrl toggles the other classic way of drawing a rectangle: the
         #: first click is the CENTRE and the second a corner (issue #39,
         #: @pacaeiro). The cursor badge says which way is on.
         self._from_center: bool = False
@@ -71,6 +78,8 @@ class RectangleTool(PlaneLock, Tool):
         # The viewport reads this to keep the opposite corner coplanar.
         self.work_plane: tuple[QVector3D, QVector3D] | None = None
         self._viewport = None
+        self._shift_square_lock = False
+        self._arrow_square_lock = False
 
     # ---- Lifecycle ----------------------------------------------------------
     def on_activate(self, viewport) -> None:
@@ -89,11 +98,14 @@ class RectangleTool(PlaneLock, Tool):
             if self.work_plane is None:
                 self.work_plane = self.locked_work_plane(ctx.world)
             return
+        # The plane may follow the far corner (``drawing_plane``), so it
+        # must be judged on the point being clicked, not the last hover.
+        self.hover_point = ctx.world
         anchor, far = self._span(ctx.world)
         du, dv = self._dimensions(anchor, far)
         if abs(du) < 1e-6 or abs(dv) < 1e-6:
             # A side of zero (the second corner on the first's row or
-            # column, an edge snap along one axis): SketchUp draws nothing.
+            # column, an edge snap along one axis): nothing is drawn.
             # Committing it raised a degenerate-edge error deep in the
             # history (Marco's log, 2026-09-14) and rolled back noisily.
             flash = getattr(ctx.viewport, "flash_status", None)
@@ -139,7 +151,16 @@ class RectangleTool(PlaneLock, Tool):
     def on_hover(self, ctx: ToolContext) -> None:
         self.note_plane(ctx.viewport)
         self._viewport = ctx.viewport
+        # First: the plane follows a snapped far corner (``plane_points``),
+        # so the square test below must see this point, not the last one.
         self.hover_point = ctx.world
+        square_inference = (self.start_point is not None
+                            and self._square_corner(
+                                self.start_point, ctx.world)[1])
+        if not (ctx.modifiers & Qt.ShiftModifier):
+            self._shift_square_lock = False
+        elif square_inference:
+            self._shift_square_lock = True
         self.wireframe_color = self.lock_color()
         ctx.viewport.update()
 
@@ -150,9 +171,14 @@ class RectangleTool(PlaneLock, Tool):
         the second along its vertical axis."""
         if self.start_point is None or self.hover_point is None:
             return False
-        if not (isinstance(value, tuple) and len(value) == 2):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not self._square_locked():
+                return False
+            w = h = value
+        elif isinstance(value, tuple) and len(value) == 2:
+            w, h = value
+        else:
             return False
-        w, h = value
         if w <= 0.0 or h <= 0.0:
             return False
         u, v = self._axes()
@@ -187,13 +213,13 @@ class RectangleTool(PlaneLock, Tool):
             (c[2], c[3]),
             (c[3], c[0]),
         ]
-        # A diagonal across the square is SketchUp's "Square" cue (preview only).
+        # A diagonal across the square is the "Square" cue (preview only).
         if is_square:
             lines.append((c[0], c[2]))
         return lines
 
     def value_label(self):
-        """Floating ``width × height`` readout while dragging (SketchUp's VCB
+        """Floating ``width × height`` readout while dragging (the VCB
         dimensions). The viewport draws it near the rectangle's centre. When the
         sides are equal it reads "Cuadrado"."""
         if self.start_point is None or self.hover_point is None:
@@ -210,13 +236,18 @@ class RectangleTool(PlaneLock, Tool):
     def _span(self, cursor: QVector3D) -> tuple[QVector3D, QVector3D]:
         """The two opposite corners the cursor asks for: from the first
         click to the cursor, or — from the centre — the cursor and its
-        mirror through the first click. The square nudge is applied to
-        the span, so a centred square stays centred."""
+        mirror through the first click.
+
+        The square nudge is applied to the CURSOR relative to the anchor
+        (the first click) first, and only then mirrored. Anchoring on the
+        centre is what keeps a centred square a true square: nudging the
+        mirror instead (holding it fixed while the cursor moved) grew the
+        wrong side, so a 4.00 x 4.10 m rectangle came out labelled
+        "Cuadrado"."""
+        far, _sq = self._square_corner(
+            self.start_point, cursor, force=self._square_locked())
         if self._from_center:
-            mirror = self.start_point * 2.0 - cursor
-            far, _sq = self._square_corner(mirror, cursor)
             return self.start_point * 2.0 - far, far
-        far, _sq = self._square_corner(self.start_point, cursor)
         return self.start_point, far
 
     def _set_from_center(self, viewport, on: bool) -> None:
@@ -230,7 +261,7 @@ class RectangleTool(PlaneLock, Tool):
 
     # ---- Internals ----------------------------------------------------------
     def _cursor_preview(self):
-        """SketchUp's little square on the cursor before the first corner,
+        """The little square on the cursor before the first corner,
         lying on the plane the rectangle would take (an arrow-key lock in
         its axis colour, a face under the cursor, or the view's plane)."""
         vp = self._viewport
@@ -246,6 +277,14 @@ class RectangleTool(PlaneLock, Tool):
         pts = [c + u * h + v * h, c - u * h + v * h, c - u * h - v * h, c + u * h - v * h]
         return [(pts[i], pts[(i + 1) % 4]) for i in range(4)]
 
+    def plane_points(self):
+        """First corner and far corner: a far corner snapped off the plane
+        picks the axis plane that holds both (``PlaneLock.snapped_plane``)
+        — how a window opening gets filled from jamb to jamb."""
+        if self.start_point is None:
+            return []
+        return [self.start_point, self.hover_point]
+
     def _axes(self) -> tuple[QVector3D, QVector3D]:
         """In-plane horizontal/vertical axes for the drawing plane: the
         captured / locked one, else the plane of the last hit (which follows
@@ -260,7 +299,8 @@ class RectangleTool(PlaneLock, Tool):
         delta = b - a
         return QVector3D.dotProduct(delta, u), QVector3D.dotProduct(delta, v)
 
-    def _square_corner(self, a: QVector3D, b: QVector3D) -> tuple[QVector3D, bool]:
+    def _square_corner(self, a: QVector3D, b: QVector3D,
+                       force: bool = False) -> tuple[QVector3D, bool]:
         """If the rectangle spanning ``a``–``b`` is within ``SQUARE_TOL`` of being
         square, return the opposite corner nudged to a perfect square plus
         ``True``; otherwise return ``b`` unchanged plus ``False``. The square
@@ -271,7 +311,7 @@ class RectangleTool(PlaneLock, Tool):
         adu, adv = abs(du), abs(dv)
         if adu < 1e-6 or adv < 1e-6:
             return b, False
-        if abs(adu - adv) <= self.SQUARE_TOL * max(adu, adv):
+        if force or abs(adu - adv) <= self.SQUARE_TOL * max(adu, adv):
             side = max(adu, adv)
             far = a + u * math.copysign(side, du) + v * math.copysign(side, dv)
             return far, True
@@ -318,6 +358,17 @@ class RectangleTool(PlaneLock, Tool):
             if callable(hint):
                 hint()
             return True
+        if key == Qt.Key_Down and self.start_point is not None:
+            if self._arrow_square_lock:
+                self._arrow_square_lock = False
+                viewport.update()
+                return True
+            if (self.hover_point is not None
+                    and self._square_corner(self.start_point,
+                                            self.hover_point)[1]):
+                self._arrow_square_lock = True
+                viewport.update()
+                return True
         return self.plane_lock_key(viewport, key)
 
     def _reset(self) -> None:
@@ -326,4 +377,9 @@ class RectangleTool(PlaneLock, Tool):
         self.work_plane = None
         self.hover_plane = None
         self.wireframe_color = None
+        self._shift_square_lock = False
+        self._arrow_square_lock = False
         self.clear_plane_lock()
+
+    def _square_locked(self) -> bool:
+        return self._shift_square_lock or self._arrow_square_lock

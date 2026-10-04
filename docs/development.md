@@ -15,14 +15,14 @@ Requires Python 3.12+.
 ## Running tests
 
 ```bash
-python -m pytest -m "not slow"     # the fast suite (~40 s, what CI runs)
-python -m pytest                   # everything, including the slow fuzz sweeps
+python -m pytest -m "not slow"     # the fast suite (~3,100 tests, ~5 min; what CI runs)
+python -m pytest                   # everything (~3,900), including the slow fuzz sweeps
 ```
 
-The project has ~2,000 automated tests covering the geometry engine, tools,
-import/export, the sheet composer and the plugin system. New features should
-come with tests; bug fixes should come with a regression test that fails
-without the fix.
+Every pull request runs the fast suite. A fix or a feature comes with its
+test — ideally one that fails without the change. A test that paints
+needs a real OpenGL context: guard it with a skip when there is none, or the
+CI runner (no GPU) fails it.
 
 ## Style
 

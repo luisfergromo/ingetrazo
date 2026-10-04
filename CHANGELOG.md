@@ -6,7 +6,955 @@ follow [SemVer](https://semver.org).
 
 ## [Sin publicar]
 
+### Rendimiento
+- **Orbitar un modelo con miles de componentes es 11× más fluido**: con la
+  planta industrial de la #158 (21 406 copias) cada cuadro pasaba de 1,3 s
+  a 0,12 s. Las siluetas de las copias se calculan por pieza en una sola
+  pasada de NumPy en vez de copia por copia, y su intervalo se adapta a lo
+  que cuestan (en un modelo pequeño no cambia nada); y el visor deja de
+  recorrer todas las copias en cada cuadro para firmarlas, expandirlas,
+  buscar figuras de frente o leer sus matrices: lo hace solo cuando algo
+  cambia. En la plaza, pintar −10 % y orbitar −8 % (@pacaeiro, Ronilson).
+- **El zoom y el giro ya no se cuelgan la primera vez en un modelo
+  enorme**: para saber qué punto hay bajo el cursor leen la profundidad de
+  la imagen en pantalla (unos 15 ms) en vez de construir el índice de
+  selección, que horneaba todas las copias — minutos y 8 GB en el primer
+  giro de rueda con el modelo de la #158.
+- **Seleccionar y dibujar con snap sobre un modelo enorme ya no agota la
+  memoria**: cuando las copias de componentes pasan del millón de caras,
+  el índice de selección solo hornea las que quedan cerca del cursor (y
+  delante de lo que se ve), con un tope, y suelta las que dejan de usarse.
+  Con el modelo de la #158, pasar el ratón con Seleccionar pasó de colgarse
+  por encima de 18 GB a 32 ms por movimiento y 11,7 GB; con Línea, 71 ms.
+  Los modelos normales usan el índice de siempre.
+
+## [0.5.7] — 2026-09-30
+
+**Ventanas paramétricas, la selección con puntos y una semana de pedidos
+atendidos.** Llega Windowizer, la primera extensión de ejemplo aportada por
+un usuario: ventanas con marco y vidrios a partir de una cara, que abren el
+muro y lo vuelven a cerrar. La selección se marca con puntos en vez de un
+tinte, el modo Rayos X deja ver qué aristas tienen una cara delante, las
+aristas traseras (K) se dibujan en discontinua sobre el modelo opaco, las
+pinzas de Escalar enganchan otros objetos, cada comando explica qué hace y
+F3 se abre al instante. Los modelos con miles de copias espejadas abren sin
+agotar la memoria y cerrar es instantáneo. Renderizar con Blender funciona
+en el Flatpak, IngeTrazo habla indonesio, y se resolvieron los pedidos
+pequeños que llegaron por correo y por GitHub.
+
+### Añadido
+- **Windowizer, extensión de ejemplo** (Extensiones ▸ Extensiones de
+  ejemplo ▸ Windowizer), de Bane Andreev, arquitecto: ventanas paramétricas
+  a partir de caras dibujadas en un muro, con filas y columnas (o
+  proporciones como `1,3,1`), marco, parteluces y vidrios. Cada ventana es
+  un grupo etiquetado `IfcWindow` con sus piezas «Marco» y «Vidrio n», así
+  que el panel Piezas sirve de cuadro de vidrios; el muro se atraviesa (o
+  lleva derrames si es de un solo plano), **Editar ventana** la reconstruye
+  en su sitio aunque se haya movido, y **Borrar ventana** vuelve a cerrar
+  el muro. En los seis idiomas. Es una adaptación del clásico Windowizer 3
+  de Rick Wilson (2004-2005).
+- **La selección se marca con puntos** en vez de un tinte: las caras
+  seleccionadas llevan puntos naranjas y la cara bajo el cursor los mismos
+  puntos, así se distingue también una cara vista por detrás; sobre una
+  cara naranja o roja los puntos salen azules (#218, @canalsecuario-blip).
+- **Rayos X: las aristas detrás de una cara se atenúan** hacia el fondo y
+  las que no tienen nada delante conservan su color; mirando una caja desde
+  arriba se sabe si tiene tapa (#223, @canalsecuario-blip).
+- **Cada comando dice qué hace**, como las descripciones de Blender: una
+  frase breve en el recuadro del buscador F3, en la barra de estado al
+  pasar por un menú y bajo el nombre y el atajo en el globo de los botones
+  de las barras de herramientas. Cubre los comandos de la ventana
+  principal, los del compositor de láminas y los complementos incluidos
+  (un complemento propio puede dar la suya con `description` o con
+  `tip=` en `add_menu_action`) (#213, @canalsecuario-blip).
+- **Aristas traseras** (Cámara ▸ Estilo ▸ Aristas traseras, **K**): el
+  modelo sigue opaco y las aristas que quedan detrás de una cara se dibujan
+  en discontinua, para ver por dónde sigue una barra o un perfil en un
+  plano de taller. Lo guarda el estilo (también las escenas y el `.igz`) y
+  tiene casilla en el panel Estilos; el Rectángulo girado deja la K y se
+  queda sin atajo (#234, @ales-limon).
+- **Las pinzas de Escalar enganchan puntos de otros objetos**: con la pinza
+  tomada, pasar por un extremo, un punto medio o una arista de otra pieza
+  deja la pinza a su altura, así se escala «hasta» otro objeto sin
+  teclear la medida; lo que se escala no se engancha a sí mismo (#233,
+  @ales-limon).
+- **Alt+X alterna Rayos X** y vuelve al estilo en el que estabas, con sus
+  ajustes (#228, @canalsecuario-blip).
+- **Propiedades del polígono, extensión de ejemplo** (Extensiones ▸
+  Extensiones de ejemplo), de Rony Leonel Janampa Monago: área, perímetro,
+  centroide, momentos de inercia respecto al centroide y a los ejes,
+  momentos principales con su ángulo, radios de giro y caja envolvente de
+  las caras seleccionadas; descuenta los huecos y toma varias caras
+  coplanares como una sola sección, en las unidades del documento (#229).
+- **Campo Nombre en Info de entidad** para el grupo o componente
+  seleccionado: se escribe y Enter, un paso de deshacer (#214).
+- **Clic derecho ▸ Voltear en ▸ Eje rojo / verde / azul**: refleja la
+  selección en su sitio con un clic, como en los tutoriales (#178,
+  reportado por Esteban Penzo).
+- **Luces del render en el visor**: con Seleccionar, un clic en el foquito
+  selecciona la luz (también en la lista del panel) y Supr la borra, un
+  paso de deshacer (#205). Moverlas con M llega más adelante.
+- **Preferencias ▸ Atajos de teclado ▸ Exportar… / Importar…**: los atajos
+  viajan en un archivo a otro equipo, sistema o persona, y valen en
+  cualquier idioma (#142, @pacaeiro).
+- **Preferencias ▸ General ▸ «Poner la figura de escala en los documentos
+  nuevos»**: sin ella, cada documento nuevo empieza vacío (#221).
+- **Traducción al indonesio** (Bahasa Indonesia), el sexto idioma de
+  IngeTrazo (#216, #217, @Rainjalin).
+- **Para extensiones:** `window.import_igz_path(ruta, at=None)` y
+  `app.import_igz` insertan un `.igz` como componente sin el diálogo, al
+  ratón o en un punto (#179, pedido de Georges Le Roux);
+  `app.add_menu(título)` da un submenú propio en Extensiones,
+  `app.add_context_menu(fn)` añade entradas al clic derecho,
+  `app.add_pickable(...)` deja seleccionar y borrar objetos propios, y
+  `group.ext` guarda parámetros de la extensión en sus grupos (se copian y
+  se guardan, aparte de la etiqueta BIM). Todo en `docs/plugins.md`.
+- **Puente MCP desde un contenedor:** el cliente lee `INGETRAZO_AI_HOST`
+  para llegar al puente por un túnel; el puente sigue escuchando solo en
+  local (#130).
+
+### Corregido
+- **Renderizar con Blender no generaba imagen en el Flatpak** («Python file
+  … could not be opened»), ni en el AppImage con el Blender de Flathub: el
+  script de render ahora viaja junto al trabajo, en una carpeta que Blender
+  siempre ve.
+- **Un número a medio escribir se tragaba los atajos con Alt**: Alt+1
+  añadía un «1» en vez de cambiar la vista, y repitiéndolo se llegaba a un
+  número gigante que dejaba la geometría con coordenadas NaN. Ctrl y Alt
+  ya no escriben en el cuadro de medidas y se rechazan los números
+  desorbitados (#185, diagnosticado por Alejandro Limón).
+- **Un documento con una sola coordenada NaN no se podía abrir**: ahora
+  abre, deja fuera solo las piezas dañadas y avisa para guardarlo
+  reparado (#185).
+- **Editar un material no cambiaba los grupos pintados enteros**: la cara
+  suelta cambiaba y la caja agrupada se quedaba con el color viejo (#155,
+  @fafecm).
+- **Un punto enganchado fuera del plano de dibujo ya no aplasta la forma**:
+  al llenar el hueco de una ventana del punto medio de una jamba al de la
+  otra, el Rectángulo salía «0.00 × 2.41 m». Rectángulo, Círculo, Polígono
+  y los tres Arcos toman el plano de los puntos enganchados; el cursor
+  libre y el bloqueo con flechas siguen como antes (#206,
+  @canalsecuario-blip).
+- **Snaps con el bloqueo paralelo/perpendicular** (flecha abajo): ya
+  enganchan extremos, cruces y alineaciones con esquinas, también sobre
+  aristas oblicuas (#209, #215, @pacaeiro).
+- **Rectángulo bloqueado como cuadrado**: un solo valor tecleado basta
+  (#210, #212, @pacaeiro).
+- **El buscador de comandos (F3) aparece al instante**: recuerda lo ya
+  preparado y calcula la lista de comandos mientras la ventana está
+  quieta; se dibuja en unos 20 ms, la primera vez incluida (#211,
+  @canalsecuario-blip).
+- **Los atajos propios de acciones con «/» en el nombre se conservan**
+  al reiniciar: Empujar / Tirar, Alternar perspectiva / paralela, glTF /
+  GLB… se guardaban anidados y volvían a su tecla de fábrica en el
+  siguiente arranque; los ya guardados así se recuperan (#236,
+  @zhang-922).
+- **Una línea bloqueada en un eje toma la altura de una guía**: con Shift
+  o la flecha arriba sobre el eje azul, pasar por una línea guía que la
+  vertical no toca no daba nada; el punto de la guía bajo el cursor se
+  calculaba sin perspectiva y caía metros fuera de la pantalla (#166,
+  @pacaeiro).
+- **Cerrar IngeTrazo con un modelo grande es instantáneo**: el proceso
+  seguía vivo, con sus gigabytes, mientras Python liberaba objeto por
+  objeto — 27 s → 1,2 s con el modelo de la #158 (@pacaeiro).
+- **Modelos con muchas copias espejadas abren y se dibujan**: cada copia
+  espejada de un componente se horneaba entera en memoria, y las demás se
+  horneaban igual para leer su caja y su silueta. Una planta industrial de
+  21 406 grupos (6 203 espejados, 14 millones de caras) pasaba de 14,5 GB
+  en el primer cuadro; ahora abre y se dibuja en 9,7 GB (#158). Seleccionar
+  con el ratón en un modelo así sigue pendiente.
+- **Los globos de ayuda sobre un botón de color se leen**: en Estilos y en
+  el compositor tomaban el color del botón como fondo (#213).
+- **Editar el color de un material de color liso**: la fila Color del panel
+  Materiales lo recolorea al instante, también en lo ya pintado; antes
+  solo cambiaba el tinte de una textura, que un color liso no tiene.
+- **El selector de color es el mismo en todos los sistemas** (el de Qt):
+  el nativo de algunos escritorios Linux no devolvía el color elegido al
+  abrirse desde un menú.
+- **Las descripciones de los menús llegan a la barra de estado** también
+  en los menús que Qt dibuja por su cuenta.
+
+### Pruebas antes de publicar
+`scripts/release_check.sh v0.5.6.1` sobre `plaza.igz`
+(`benchmarks/results/0.5.7.json`): el visor sin cambios (pintar 8,28 →
+8,29 ms, orbitar 8,08 → 8,28 ms, rehacer los búferes 32,9 → 33,0 ms),
+arranque 0,80 → 0,78 s, abrir la plaza 3,98 → 3,79 s, ningún objeto
+filtrado en seis reaperturas; suite rápida 3562 y lenta 804 correctas. La
+comprobación cazó dos cosas antes de publicar: la apertura más lenta por la
+comprobación de NaN (#185; ahora solo recorre el documento si el archivo
+trae algún NaN) y rehacer los búferes 19 % más lento por las siluetas de
+las copias (ahora la caja y la matriz de cada copia se guardan). Y la
+prueba a mano con dos monitores cazó un parpadeo de la ventana en Wayland
+que el buscador F3 provocaba al preparar su ventana por adelantado: ya no
+la prepara.
+
+## [0.5.6.1] — 2026-09-29
+
+**Las extensiones nuevas cargan en Windows, macOS y los paquetes de Linux.**
+Versión de corrección de la 0.5.6.
+
+### Corregido
+- **El Asistente IA, el puente MCP y Renderizar con Blender salían como
+  «error al cargar»** en el instalador y el portable de Windows, el `.dmg`
+  de macOS, el AppImage y el `.tar.gz` (#208, reportado por @fafecm y
+  @blender3darchitect). Un módulo nuevo que sólo usan esas tres extensiones
+  quedaba fuera del paquete. Ahora el empaquetado reúne solo todo lo que
+  importan las extensiones, y `--check` carga cada una en la CI: un paquete
+  con una extensión rota ya no puede publicarse. El Flatpak y el Snap no
+  estaban afectados.
+
+### Cambiado
+- **IngeTrazo se describe por sí mismo** en la interfaz, las fichas de
+  Flatpak y Snap, el instalador y la documentación. El formato se llama
+  «SKP (.skp)» en Archivo ▸ Importar, y si un `.skp` no se puede leer, el
+  aviso sugiere exportarlo como COLLADA u OBJ desde el programa de origen.
+
+## [0.5.6] — 2026-09-29
+
+**Render con Blender, una pestaña para la IA y los aportes de la comunidad.**
+IngeTrazo renderiza imágenes fotorrealistas con el Blender que ya tengas
+instalado, de día o de noche con luces propias, y puede renderizar sola la
+vista cada vez que te detienes al recorrer el modelo. El Asistente IA y el
+puente MCP viven ahora en una pestaña de la barra lateral, y Ventana ▸ Paneles
+deja ocultar las pestañas que no uses. De la comunidad llegan el buscador de
+comandos F3, la API de extensiones 2, importar STL, Pegar en su lugar y Zoom a
+la selección. Y una tanda de reportes resueltos, incluido el transportador que
+en milímetros o pulgadas no daba el ángulo tecleado.
+
+### Añadido
+- **Renderizar con Blender** (#181), una pestaña de la barra lateral:
+  - Usa el Blender del sistema (EEVEE o Cycles); si no lo encuentra, explica
+    cómo instalarlo según el paquete (Windows, Mac, AppImage, Flatpak).
+  - **Ambiente** de día (el sol del panel Sombras, con su intensidad), de
+    noche o nublado.
+  - **Luces puntuales y focos** que se colocan con un clic sobre el modelo,
+    con temperatura de color (Kelvin), potencia, apertura y orientación; se
+    guardan en el documento y se deshacen con Ctrl+Z.
+  - **Acabados para el render** en cada material (vidrio, agua, metal,
+    brillante…), desde el clic derecho sobre la muestra; «Automático»
+    lo adivina por el nombre.
+  - Las figuras que miran a la cámara (Sumari, árboles de imagen) salen de
+    frente y recortadas.
+  - La imagen se abre en su propia ventana, con zoom, Guardar y Abrir carpeta.
+  - **Sincronizar con la vista**: con Blender abierto en segundo plano, cada
+    vez que la cámara se detiene sale un borrador de lo que ves en uno o dos
+    segundos; editar el modelo recarga la escena.
+- **Pestaña IA**: el Asistente IA y el puente MCP en la barra lateral. El
+  prompt admite varias líneas (Enter envía, Mayús+Enter salta de línea);
+  Ctrl+Mayús+A trae la pestaña aunque esté oculta.
+- **Ventana ▸ Paneles**: todas las pestañas de la barra lateral, también las
+  de extensiones, para ocultarlas o mostrarlas; la misma lista con clic
+  derecho sobre las pestañas. Lo oculto se recuerda al reabrir.
+- **Buscador de comandos (F3)**, como el F3 de Blender o la línea de
+  comandos de Rhino: se escriben unas letras y
+  Enter ejecuta el comando. Encuentra cualquier acción de la ventana
+  (menús, herramientas, paneles, complementos) en el idioma de los menús
+  o en inglés, por su ruta de menú, por iniciales («rf» → Invertir caras,
+  en inglés *Reverse Faces*) y aunque tenga una errata («orinetar»), sin
+  importar tildes ni mayúsculas. Cada resultado es una sola fila, como en
+  Blender (ruta atenuada ▸ icono y nombre, atajo a la derecha), el cuadro
+  se abre bajo el ratón, dentro del área de modelado y sin tapar las
+  barras laterales ni superiores, con diez filas a la vista, clic derecho ▸
+  Cambiar atajo… lleva a Preferencias, y una letra escrita con un menú
+  abierto busca solo en ese menú. Al dejar el ratón sobre un resultado
+  aparece, como en Blender, un recuadro con el nombre, qué hace y su atajo,
+  sin textos cortados. También en Ayuda ▸ Buscar comandos… y en el
+  compositor de láminas, con sus propios comandos (#168,
+  @canalsecuario-blip). La barra de estado lo menciona al abrir el programa.
+- **Las herramientas del compositor tienen nombre corto** («Cota en
+  cadena»); la explicación larga queda en el recuadro de ayuda.
+- **Importar STL** (binario y de texto) con la unidad del modelo y la unión
+  de caras planas, leído en segundo plano; y **Edición ▸ Simplificar malla**
+  (#161, @kagehak).
+- **API de extensiones 2**: varios paneles con nombre por extensión que
+  vuelven a su lugar, dibujo sobre el visor con `world_to_pixels`, tipos de
+  archivo propios y espacios de trabajo (#141, @felixriestra). Además, varias
+  extensiones pueden compartir una pestaña y añadir entradas al menú
+  Extensiones; la guía explica dónde conviene poner la interfaz de cada una.
+- **Pegar en su lugar** (Ctrl+Alt+V), dentro de cualquier grupo (#188), y
+  **Zoom a la selección** (#193) (@canalsecuario-blip).
+- **Supr borra la arista o cara bajo el cursor**, sin seleccionarla; Retroceso
+  borra sólo la selección (#98, @canalsecuario-blip).
+- **Importar DWG en Windows, macOS y el Flatpak**: el conversor de LibreDWG
+  va dentro de todos los paquetes (#101, #180).
+- **Traducción al italiano** (#182, @deedend) y portugués de Brasil al día
+  (#186, @dafrobozao).
+- En Ayuda ▸ Acerca de, los créditos se detienen al pasar el ratón y se
+  recorren con la rueda.
+
+### Corregido
+- **Un ángulo, un factor de escala o un número de lados tecleado se escalaba
+  con la unidad del documento**: en milímetros, «45» en Rotar giraba 0,045°
+  (#176, reporte de Esteban Penzo).
+- **Una arista copiada con Mover a través de una cara no la dividía** (#177,
+  reporte de Lefteris Schetakis).
+- **Ctrl+Z a mitad de una línea** deja la cadena en el vértice anterior en vez
+  de seguir desde un punto que ya no existe (#175, @pacaeiro).
+- **La Cinta métrica cambiaba de modo con Ctrl+Z**: ahora sólo con un toque de
+  Ctrl (#183); no crea guías de longitud cero ni recorta su vista previa
+  (#173, #174, @pacaeiro).
+- **El pan era lentísimo con el zoom al máximo**: se mide por la profundidad
+  de lo que está bajo el cursor (#184).
+- **Valores no finitos** (un número enorme en el cuadro de medidas) ya no
+  bloquean las herramientas ni se guardan en el documento (#185, primera
+  parte). Reportes de Alejandro Limón.
+- **La cota en cadena del compositor** seguía cortándose tras cada tramo
+  (#187, @tonfdd).
+- **La barra de herramientas muestra el atajo configurado**, no el de
+  fábrica (#171, @pacaeiro).
+- **Rectángulo**: la inferencia de cuadrado engancha (#169, #170, @pacaeiro).
+- **El cursor de Empujar/Tirar desaparecía en Windows** tras usarlo (#191).
+- **El Asistente IA en Mac no conectaba** (`CERTIFICATE_VERIFY_FAILED`): usa
+  los certificados del sistema, sin desactivar la verificación (#198,
+  diagnóstico de @troya2).
+- El diálogo de cambios sin guardar y los botones estándar de Qt salen en el
+  idioma del programa (#154, @canalsecuario-blip).
+
+### Antivirus
+- El instalador de Windows se construye con un cargador de PyInstaller
+  compilado por nosotros, lo que reduce los falsos positivos de Windows
+  Defender (#162). La firma digital (SignPath) está en trámite.
+
+### Pruebas antes de publicar
+`scripts/release_check.sh v0.5.5` sobre `plaza.igz`
+(`benchmarks/results/0.5.6.json`): el visor sin cambios (pintar 9,63 → 9,99
+ms, orbitar 10,31 → 9,69 ms), abrir la plaza 4,74 → 4,72 s, arranque 0,82 →
+0,91 s (las pestañas nuevas), ningún objeto filtrado en seis reaperturas;
+suite rápida 3444 y lenta 804 correctas.
+
+## [0.5.5] — 2026-09-28
+
+**Íconos renovados y lo que los usuarios pidieron.** IngeTrazo se queda solo
+con piezas libres: el enlace a un conversor externo de `.skp` y la
+exportación a `.skp` se retiran, y los `.skp` se siguen abriendo con el
+lector libre integrado. Los íconos se actualizan para mantenerlos coherentes
+en toda la interfaz. Y una tanda
+de reportes resueltos: la órbita gira alrededor de lo que miras, Empujar/Tirar
+se detiene en las guías de la Cinta, rotar cae exacto en el punto enganchado,
+guardar ya no deja un «cambios sin guardar» fantasma, y las medidas salen en
+las unidades del documento.
+
+### Retirado
+- **El enlace a un conversor externo de `.skp`.** Nunca formó parte de
+  IngeTrazo: ningún paquete lo incluía; IngeTrazo solo ofrecía descargarlo
+  aparte para ejecutarlo bajo Wine. Ese enlace y la descarga se retiran.
+  Los `.skp` se abren con el lector libre integrado (OpenSKP);
+  si uno no se puede leer, IngeTrazo lo dice y sugiere exportarlo como
+  COLLADA u OBJ desde el programa de origen.
+- **Exportar a `.skp`**: el molde en blanco que usaba el escritor ya no se
+  distribuye en ningún paquete (PyInstaller, Flatpak, Snap), y `--check`
+  falla un paquete que todavía lo traiga. Para llevar un modelo a otro
+  programa, exporta COLLADA (.dae), OBJ o glTF.
+- Las pruebas y la herramienta de validación que dependían de ese
+  conversor; `scripts/skp_diff.py` compara ahora contra un `.dae` de
+  referencia.
+- **Ayuda ▸ Obtener más modelos** enlaza a Poly Haven, ambientCG y
+  Sketchfab.
+
+### Cambiado
+- **Íconos actualizados para mantenerlos coherentes con el resto de la
+  interfaz**:
+  Caminar son dos huellas, Mirar alrededor una cabeza vista desde arriba con
+  su cono de visión, las herramientas de sólidos dos discos que se cruzan, el
+  texto una T en un marco, el zoom a la extensión cuatro esquinas alrededor
+  de la lupa, y las cotas terminan en puntos. **Situar cámara es una
+  camarita** con el lente naranja y una marca debajo, y **el borrador una
+  goma inclinada** con su punta naranja. Las **vistas estándar siguen siendo
+  la casita** con la pared que se mira en naranja.
+- **IngeTrazo se presenta por sí mismo**: el README, la ficha del Flatpak y
+  la del Snap lo describen con su lema, *traza como a mano*, y dicen cómo
+  se pronuncia su nombre (in-je-TRA-so: *inge*niería + *trazo*; sugerencia
+  de @pacaeiro).
+
+### Añadido
+- **Repetir el último comando con Mayús+R**, y como primera entrada del menú
+  del clic derecho (#145, @canalsecuario-blip).
+
+### Corregido
+- **Rotar y Transportador enganchan el eje rojo aunque la línea de
+  referencia esté a pocos grados de él** (#140, @pacaeiro). El brazo se
+  quedaba pegado a la dirección de la propia referencia («A través del
+  punto») y la extensión de otras aristas movía el ángulo según la
+  distancia del cursor. El brazo del transportador ya no usa las
+  inferencias de dibujar líneas (a través del punto, extensión, desde el
+  punto): solo puntos y ejes.
+- **La extensión ya no sale de un segmento de círculo, arco o superficie
+  suavizada, ni de una arista oculta** (#140): lanzaba líneas de trazos a
+  través de la esfera.
+- **La órbita gira alrededor de lo que estás mirando** (#164, @mariuseng-dot):
+  el punto del modelo bajo el cursor al empezar a arrastrar, o el modelo a la
+  vista si apuntas al cielo, y ese punto se queda bajo el cursor. Antes
+  giraba alrededor del objetivo de la cámara, lejísimos en un modelo grande.
+- **Empujar/Tirar se detiene en los puntos y líneas guía de la Cinta**
+  (#165, @ewertondiaseng-byte), con el aviso «Punto guía» / «En línea».
+- **Rotar cae exacto en el punto enganchado** (#163, @fafecm): con el
+  segundo clic enganchado a un punto, se aplicaba el ángulo redondeado a 0,1°
+  de la etiqueta (−70,3°) y la arista quedaba ~0,7 mm al costado a 2 m del
+  pivote. Además la vista previa ya no acumula error: se calcula siempre
+  desde una copia tomada al empezar, y cancelar deja todo idéntico.
+- **Guardar y cerrar ya no pregunta por cambios sin guardar** (#159,
+  @pacaeiro): cualquier cambio de selección después de guardar contaba como
+  una modificación.
+- **Círculo, polígono, empalme y recorrido muestran las medidas en las
+  unidades del documento** (#149, @xyont): en milímetros decían metros. Lo
+  que tecleas en el cuadro de valores se ve con la unidad en que se leerá, y
+  «lados»/«segmentos» se traducen.
+- **El Rectángulo acepta `200,100`** (sin espacio) como ancho y alto
+  (#152, @xyont). `200, 100` y `200;100` siguen valiendo; en las demás
+  herramientas la coma sigue siendo el decimal.
+- **Una cara invertida sigue invertida al seguir dibujando**
+  (#144, @canalsecuario-blip).
+- **Todas las pestañas de la bandeja derecha caben en los 240 px mínimos**
+  (#139, @felixriestra): los botones de Capas y los combos de Terreno se
+  cortaban.
+
+
+## [0.5.4] — 2026-09-26
+
+**Un día de reportes, resuelto.** Tirar hacia arriba contra una pared (la
+#94, que se nos resistía), esferas con Sígueme, guías exactas al milímetro,
+componentes cuyas copias comparten lo de dentro, grupos que ya no saltan al
+explotarlos y líneas sueltas en el `.skp`. Las láminas ganan líneas ocultas
+a trazos, una lista de elementos como la de QGIS y los dos clics que se
+perdían. Atajos de teclado propios en Preferencias, el ratón 3D con cada
+eje invertible, IngeTrazo en chino y el instalador de Windows en tres
+idiomas. El Ingeniero es la nueva figura de escala.
+
+### Cambiado
+- **En KDE Plasma con Wayland, IngeTrazo arranca en X11 (XWayland)** (#136,
+  @leo-smi): ahí los menús flotantes de Qt salen rotos. Preferencias ▸
+  General ▸ Servidor gráfico sigue permitiendo elegir Wayland.
+- **El instalador de Windows habla inglés, español y portugués** (#135,
+  @xyont), según el idioma de Windows.
+- **La figura de escala de un documento nuevo es el Ingeniero** (1,70 m,
+  casco y chaleco), dibujado de nuevo de pie y con los dos pies en el
+  suelo. Sumari sigue en la biblioteca de personas.
+
+### Añadido
+- **Atajos de teclado propios** (#138, @pacaeiro): Preferencias ▸ Atajos
+  de teclado lista todas las acciones con su atajo, con buscador; eliges una y
+  pulsas las teclas nuevas. Si otra acción ya las usaba, te lo pregunta y se
+  las quita (dos acciones con la misma tecla no funcionarían ninguna). Botón
+  para volver al de fábrica, de una o de todas. Se recuerdan aunque cambies
+  de idioma.
+- **Ratón 3D: invertir cada eje por separado** (#108, sugerencia de
+  @mnavarromugas, el primero que lo prueba con un SpaceMouse real):
+  desplazar izquierda/derecha y arriba/abajo, acercar, inclinar y girar,
+  cada uno con su casilla en Preferencias ▸ Ratón 3D.
+- **La lista de Elementos del compositor, como en QGIS** (#93, @pacaeiro):
+  cada elemento con un ojo (mostrar/ocultar; oculto no se ve, no se toca y no
+  se imprime) y un candado (bloquear/desbloquear); se puede renombrar (F2 o
+  clic derecho; el nombre viaja en el .igz) y agrupar por tipo en carpetas.
+  Un clic selecciona, doble clic lleva a sus propiedades.
+- **Líneas ocultas a trazos en las láminas** (#81, @pacaeiro): una vista en
+  estilo vectorial puede dibujar las aristas que quedan detrás de las caras,
+  finas y a trazos, como en un plano técnico (casilla «Líneas ocultas» del
+  panel; salen también en el DXF, en su propia capa discontinua).
+- **Extensiones de ejemplo de varios archivos**: el menú Extensiones ▸
+  Extensiones de ejemplo instala también una extensión que es una carpeta
+  (la base para que el CAM de @felixriestra venga incluido, PR #132).
+- **Espacio vuelve a Seleccionar en el compositor**, como en el modelo (#83,
+  @pacaeiro).
+- **IngeTrazo en chino simplificado** (Idioma ▸ 简体中文), traducido por
+  @liujvnes (#123). Su archivo no cargaba por una coma y porque algunas
+  variables venían traducidas (`{名称}` en vez de `{name}`); ahora una prueba
+  revisa cada archivo de idioma para que eso no vuelva a pasar. De paso,
+  Preferencias ya ofrece el portugués, que solo estaba en el menú.
+
+### Corregido
+- **Las líneas sueltas llegan al .skp** (#137, @pacaeiro): las aristas que no
+  bordean ninguna cara (el círculo de camino de una esfera, una línea de
+  construcción) no se exportaban. Ahora salen, y un círculo o arco como una
+  sola curva.
+- **Compositor: dos clics vuelven a colocar vistas, flechas y líneas** (#95,
+  @pacaeiro): si entre el primer y el segundo clic el lienzo se redibujaba
+  (por ejemplo al terminar el render de una vista), el primer clic se perdía.
+- **El material de un grupo aparece en «En el modelo»** (#133, @fafecm):
+  pintar un grupo no lo añadía a la lista hasta explotarlo, y Purgar podía
+  borrar un material que solo llevaba un grupo.
+- **Al explotar un grupo, lo de dentro se dibuja donde está** (#134,
+  @fafecm): tras agrupar copias, mover el grupo y explotarlo, una copia se
+  dibujaba donde estaba antes de agrupar y mover (su recuadro de selección sí
+  estaba bien) hasta que algo la obligaba a redibujarse, como pintarla.
+- **Un rectángulo dibujado de lado a lado de una cara la parte**: con las
+  cuatro esquinas sobre el borde (una franja en un peldaño, desde el borde
+  hasta la contrahuella) la cara quedaba entera con el rectángulo encima, y
+  al tirar de él salía un sólido roto. Con líneas sí quedaba limpio.
+- **Las copias de un componente comparten los grupos de dentro** (#97): al
+  copiar un componente hecho de varios grupos, editar un grupo dentro de una
+  copia no cambiaba las otras. Ahora todo lo que hay dentro de un componente
+  es de su definición; un grupo que sale de una copia
+  (Explotar) se vuelve suyo al abrirlo y no toca a las demás.
+- **Sumari ya no se cuela en un diseño recién abierto** (#75, @pacaeiro): el
+  visor guardaba datos de las figuras por su dirección en memoria, que Python
+  reutiliza; tres de esas cachés no se vaciaban al abrir otro documento.
+- **Tirar hacia arriba contra una pared** (#94, @xyont): un área dibujada en
+  el peldaño de abajo de un escalón, pegada a la contrahuella, no se podía
+  tirar hacia arriba («rompería el sólido»), y bajarla sí. La franja donde el
+  lado nuevo queda pegado a la pared ahora desaparece. De
+  paso, los anillos concéntricos empujados a distintas alturas (el «ojo»),
+  que se rechazaban o dejaban una pared dentro del sólido, salen con el
+  volumen exacto.
+- **La esfera con Sígueme sale bien** (#125, #128): un círculo barrido
+  alrededor de otro con el mismo centro daba una esfera achatada cuando el
+  perfil no caía justo sobre un vértice del camino, y un perfil de círculo
+  entero se barría dos veces. Ahora Sígueme gira el perfil alrededor del eje
+  (esfera, torno, jarrón) y la esfera sale cerrada, exacta y como una sola
+  superficie lisa que se pinta de un clic.
+- **Compositor: una vista movida engancha donde está** (#122, PR #124 de
+  @pacaeiro): tras mover una vista (con el ratón, las flechas o deshacer),
+  la cota y todo lo que engancha seguían buscando los vértices donde estaba
+  antes.
+- **Rectángulo desde el centro: el «Cuadrado» es un cuadrado** (#119, PR #126
+  de @pacaeiro): con Ctrl, el aviso de cuadrado salía con lados distintos
+  (4,00 × 4,10 m).
+- **Las unidades se recuerdan para los documentos nuevos** (#121): elegir
+  milímetros en Preferencias ▸ Unidades solo valía para el documento abierto
+  y cada archivo nuevo (o cada arranque) volvía a metros. Ahora la casilla
+  «Usar también para documentos nuevos» las guarda; un archivo que se abre
+  sigue con sus propias unidades.
+- **Las líneas guía se cruzan donde deben** (#110): el cruce de dos guías
+  diagonales, y lo que se dibujaba desde él, quedaba hasta 2 mm fuera de las
+  guías (se veía al acercar el zoom). Una guía «infinita» llegaba al cálculo
+  como un segmento de 10 km, demasiado largo para la precisión de los números;
+  ahora se recorta a lo que se ve.
+- **Modelos grandes con cotas o textos ya no van a tirones**: para saber qué
+  parte de cada cota queda tapada, el visor lanzaba miles de rayos contra
+  todo el modelo en cada cuadro (una casa de 284 000 triángulos con 25
+  cotas: casi 2 s por cuadro al orbitar). Ahora lo lee de la profundidad que
+  la tarjeta gráfica ya calculó: 34 ms por cuadro, 50 veces más rápido.
+- **Archivos `.skp` de 2018 (y anteriores) que abrían incompletos**: una
+  cota anclada a un punto dentro de grupos anidados desalineaba la lectura y
+  se perdía casi todo lo que venía después en la raíz del modelo (una casa
+  abría con 2 de sus 72 objetos: solo muros y césped). Ahora abren enteros
+  (2384 colocaciones en vez de 12) y también se leen esas cotas. Arreglo
+  propuesto a OpenSKP (iamahsanmehmood/openskp#384) y aplicado en IngeTrazo
+  mientras tanto. Gracias a Juan José Noriega por los modelos.
+
+## [0.5.3] — 2026-09-25
+
+**Lo que pidieron los usuarios, y extensiones para lo que solo algunos
+necesitan.** Pinzas de rotación en Mover y un menú Seleccionar; copias `5x10m`; el ratón 3D; y los fallos que destaparon vuestros
+vídeos: Escalar que rompía la geometría, el cubo fantasma al girar y la foto
+tapada por lo que tenía detrás. Las extensiones ya pueden guardar datos en
+el documento, añadir un panel y ofrecer inferencias; Niveles, de José Castro
+Basso, es la primera y viene como ejemplo.
+
+### Añadido
+- **Los componentes se desarman** (PR #96, Félix Riestra):
+  - **Importar OBJ conserva sus piezas:** un archivo con varios grupos
+    (`g`/`o`) llega como UN componente con un grupo por pieza, cada una con
+    su nombre (sin la jerga de Blender). Un OBJ de un solo grupo se importa
+    como antes.
+  - **Dividir en piezas** (Edición, clic derecho y panel Piezas): separa un
+    componente en sus piezas físicas, aunque los tableros se toquen.
+  - **Panel Piezas** con la **lista de corte**: largo × ancho × espesor de
+    cada pieza, material, ocultar, renombrar, y copiar la lista a una hoja
+    de cálculo (piezas iguales en una línea con su cantidad).
+  - **Vista explosionada:** un deslizador separa las piezas hacia fuera o a
+    lo largo de un eje, y Reensamblar las devuelve; se guarda en el `.igz`.
+
+- **Estilos: Color trasero** (PR #99, Gabriel Rodríguez):
+  junto al Color frontal, el color de las caras vistas por detrás (el
+  interior de un sólido, una cara invertida). Sin elegir, sigue el de
+  siempre o el que traiga un `.skp`; se guarda en el documento, en las
+  escenas y en la biblioteca de estilos.
+
+- **Copias con cantidad y separación en una sola entrada** (#111): al mover
+  con Ctrl, escribir `5x10m` hace cinco copias separadas 10 m en la dirección
+  del cursor; justo después de una copia, recoloca las copias con esa
+  separación. `3x` y `/3` siguen igual.
+
+- **Clic derecho ▸ Seleccionar** (#106): todo lo
+  conectado, aristas delimitantes, todo con el mismo material y todo en la
+  misma capa. Actúa dentro del grupo que se está editando, como Seleccionar
+  todo.
+- **Ratón 3D (SpaceMouse de 3Dconnexion)** (#108): se sostiene el modelo
+  (mover, subir, acercar, inclinar y girar la
+  tapa). En Linux lo lee `spacenavd`; en Windows, Raw Input junto al
+  controlador de 3Dconnexion. Los dos botones ajustan el modelo a la vista.
+  Preferencias ▸ Ratón 3D: velocidad, invertir cada grupo y «solo desplazar
+  y zoom» para dibujar en planta. Sin probar aún con un dispositivo real;
+  macOS todavía no.
+
+- **Pinzas de rotación en Mover** (#115): al pasar Mover
+  sobre un grupo o componente aparecen cruces rojas en las caras de su caja;
+  al tomar una, el objeto gira en ese plano alrededor de su centro, con el
+  transportador, los pasos de 15°, el ángulo tecleado y Ctrl = copia.
+
+- **Extensiones que van más allá de una herramienta**: con `setup(app)` una
+  extensión guarda sus datos en el documento (con deshacer), añade una
+  pestaña a la bandeja lateral, dibuja sobre el visor y ofrece inferencias al
+  cursor, sea cual sea la herramienta activa (`docs/plugins.md`). Ejemplo:
+  **Niveles** (`examples/extensions/niveles.py`), idea y primera versión de
+  José Castro Basso (FADU–UDELAR): niveles del edificio con guías en alzados
+  y cortes y enganche a sus alturas, y un botón «Ver alzado». Viene con el
+  programa pero sin activar: se instala desde **Extensiones ▸ Extensiones de
+  ejemplo**. Lo que solo algunos necesitan vive en una extensión, no en el
+  núcleo.
+
+- **Edición ▸ Invertir selección** (Ctrl+Mayús+I, PR #113, Gabriel
+  Rodríguez): selecciona lo que no estaba seleccionado en
+  el contexto abierto, sin tocar lo oculto ni lo que está en capas ocultas o
+  bloqueadas.
+
+### Cambiado
+- **La bandeja lateral recuerda qué secciones dejaste plegadas** (Info de
+  entidad, Capas, Escenas, Materiales, Componentes…): al volver a abrir
+  IngeTrazo aparecen como las dejaste (pedido de un usuario de Brasil).
+- **Asistente IA: LM Studio además de Ollama.** El proveedor local ya hablaba
+  la API compatible con OpenAI que usa LM Studio; ahora la interfaz lo dice:
+  «Local: Ollama / LM Studio», con la URL de cada uno en la ayuda
+  (`http://localhost:1234` para LM Studio).
+- **Icono de Zoom a extensión** (#112): ahora es la lupa con tres flechas
+  hacia las esquinas, para que se
+  reconozca; antes eran cuatro esquinas que pocos identificaban.
+
+### Corregido
+- **Fuga de memoria al abrir documentos**: cada Nuevo / Abrir dejaba vivos
+  los datos de dibujo del documento anterior (y con ellos sus caras), y cada
+  componente editado sus búferes en la tarjeta gráfica. Reabrir la plaza de
+  Yanque cinco veces llevaba la 0.5.2 de 610 a 1440 MB y cada apertura era
+  más lenta; ahora la memoria se estabiliza. Lo encontró la nueva
+  verificación previa a cada versión (`scripts/release_check.sh`, resultados
+  en `benchmarks/results/`).
+- **Láminas: una vista redimensionada ya no se estira** (PR #116, Pedro
+  Caeiro, #80): el dibujo conserva su escala, el borde nuevo
+  se ve como papel y la vista se vuelve a renderizar sola al soltar (con
+  Autorenderizar), sin bloquear la ventana.
+- **Una imagen de referencia ya no queda tapada por lo que está detrás**:
+  un triángulo trazado sobre una foto en el suelo y empujado hacia abajo
+  pintaba sus caras sobre la foto vista desde arriba. Lo que se traza encima
+  de la imagen sigue viéndose encima.
+- **Escalar ya no destroza la geometría suelta**: al arrastrar una pinza a
+  factores muy pequeños y volver varias veces, algunos vértices quedaban sin
+  escalar y las caras se rompían al soltar (vídeo de un usuario, en Linux y
+  Windows). La vista previa se calcula siempre desde las posiciones
+  originales.
+- **Un grupo girado sobre su centro seguía dibujado donde estaba**: el visor
+  reconoce «sin cambios» por una suma de coordenadas, y girar sobre el
+  centro no la cambia. Con las pinzas de rotación (que giran siempre sobre
+  el centro) quedaba siempre el cubo fantasma; con Rotar, al girar sobre el
+  centro exacto.
+- **Compositor sin barras de herramientas** (#114, macOS): si al abrir no
+  queda ninguna barra visible (y entonces no hay dónde hacer clic derecho
+  para recuperarlas), vuelven a su sitio de fábrica. Una barra ocultada a
+  propósito sigue oculta.
+- **Láminas: la cota con Mayús pasa de horizontal a vertical** (#104): con
+  los dos puntos ya puestos, el cursor elige la dirección como en AutoCAD
+  (arriba o abajo = horizontal, a un lado = vertical). Antes la decidían los
+  dos puntos y una cota horizontal nunca podía volverse vertical.
+- **Un `.skp` vacío abre vacío** (#103): una plantilla `.skp` sin nada
+  dibujado se mandaba al conversor externo, así que en Windows pedía
+  instalarlo para abrir una hoja en blanco. Ahora abre y la barra de
+  estado dice que el archivo no tiene geometría.
+- **Mac:** el diálogo de cambios sin guardar ya se lee en el tema oscuro, y
+  los deslizadores destacan sobre el fondo oscuro (PR #96).
+
+## [0.5.2] — 2026-09-24
+
+**Grupos que son grupos, láminas más cómodas y la perspectiva de dos puntos.**
+Un grupo de grupos ya no se hace pasar por componente y Hacer único no
+explota los subgrupos (#90); Crear componente con varios grupos hace uno
+solo; Ctrl+Tab entre el modelo y las láminas; la perspectiva de dos puntos y
+la vista actual a DXF, de José Castro Basso; la guía provisional del Metro y
+el Transportador; y el compositor con cursores, dos clics y edición de
+varias cotas a la vez.
+
+### Añadido
+- **Perspectiva de dos puntos** (José Castro Basso, FADU–UDELAR):
+  **Cámara ▸ Perspectiva de dos puntos** mantiene verticales
+  las líneas verticales, como pide un dibujo de arquitectura, con lo que
+  se mira siempre en el centro. Las escenas la recuerdan; mirando casi en
+  vertical hacia abajo vuelve sola a la perspectiva normal.
+- **Archivo ▸ Exportar ▸ Vista actual como DXF** (José Castro Basso): la
+  vista en pantalla como líneas para CAD, sin las ocultas. En paralela, a
+  tamaño real en metros, con aristas, perfiles y corte en capas separadas
+  (como «Exportar vista como DXF» de las láminas). En perspectiva —la de
+  dos puntos incluida— las líneas ocultas se calculan en la propia
+  perspectiva y el dibujo se recorta a lo que muestra la ventana; lo que
+  está a la distancia del punto de mira sale a tamaño real.
+- **Ctrl+Tab: del modelo a las láminas y vuelta** (#91, @pacaeiro). Desde
+  el modelo va a la última lámina abierta (o crea la primera); desde el
+  compositor, al modelo. En el compositor, **Ctrl+RePág / Ctrl+AvPág**
+  pasan a la lámina anterior o siguiente, como las hojas de Calc. Al
+  pasar el ratón por las pestañas Modelo y Lámina, un aviso lo recuerda.
+- **Rectángulo girado: Mayús fija la dirección de la arista base** (#70,
+  @pacaeiro), como ya fijaba el ángulo del ancho: con Mayús pulsada solo
+  la longitud sigue al cursor, y la longitud escrita va en esa dirección.
+- **La guía que vas a crear se ve antes del clic** (#89, @pacaeiro): con
+  el Metro y el Transportador, la línea guía provisional sigue al ratón a
+  trazos, como quedará. Ya se intentaba dibujar, pero en perspectiva una
+  guía tiene un extremo detrás de la cámara y se descartaba entera.
+
+### Corregido
+- **Compositor: «dos clics» vuelve a funcionar** (#95, @pacaeiro) al colocar
+  una vista, un rectángulo, una línea… Si la mano se movía unos píxeles al
+  soltar el primer clic, contaba como un arrastre diminuto: dejaba una vista
+  del tamaño mínimo y el segundo clic se perdía. Ahora manda la distancia de
+  arrastre del sistema.
+- **Un grupo de grupos es un grupo, no un componente** (#90, @fafecm). Al
+  hacer Crear grupo con grupos dentro, el resultado se presentaba y se
+  exportaba como componente, y Hacer único fundía sus subgrupos en una sola
+  malla. Ahora:
+  - Info de entidad lo llama **Grupo**, no sale en la lista de componentes
+    y ofrece **Crear componente**, que lo convierte con sus subgrupos.
+  - **Crear componente con varios grupos seleccionados** (o grupos y
+    geometría suelta) hace UN componente que los contiene, cada uno aún
+    grupo dentro. Antes hacía un componente por grupo, o se negaba.
+  - **Hacer único** sobre un componente con subgrupos lo deja como grupo,
+    con su propia copia de todo el árbol y los subgrupos intactos.
+  - Las **copias de un grupo** ya no se editan todas a la vez: al abrir una
+    para editarla se hace única.
+  - En **.skp** un grupo de grupos sale como grupo y sus
+    subgrupos como grupos (comprobado con archivos de referencia). Los `.igz`
+    guardan la diferencia; los archivos anteriores la deducen al abrirse.
+- **La consola de Python sigue el tema** (#92, @xyont): con el tema claro
+  tenía el fondo negro. Ahora usa colores claros (los de VS Code Light+), y
+  cambia con el tema aunque esté abierta, incluido lo ya escrito.
+- **«Añadir localización» ya abre el mapa** desde el panel de Sombras. En
+  Wayland se quedaba cargando sin mostrar nada: el diálogo colgaba del menú
+  desplegable de la barra. Ahora el menú se cierra y el diálogo sale sobre
+  la ventana principal; lo mismo para los colores y el nombre de los estilos
+  y el color de cota.
+- **Las pestañas BIM y Terreno ya no se pierden.** Al plegar y desplegar la
+  barra lateral solo volvía la pestaña que estaba delante, y el menú
+  Ventana no dejaba recuperar las otras (salían en gris). Ahora vuelven
+  todas las que estaban abiertas, y **Ventana ▸ Panel BIM** se suma a
+  Panel de propiedades y Panel de terreno.
+- **Compositor: el panel cambia TODO lo seleccionado.** Con varias cotas
+  seleccionadas, poner la unidad en m (o el grosor, las flechas, el tamaño
+  del texto…) solo cambiaba una; ahora cambian todas las del mismo tipo, y
+  un solo Ctrl+Z las devuelve. Viaja solo lo que tocaste: cada una guarda
+  su texto y su sitio. Vale para textos, formas, vistas y demás.
+- **Compositor: Ctrl+clic suma o quita de la selección donde sea**, también
+  sobre el texto de una cota. Ahí la cota se seleccionaba y se volvía a
+  deseleccionar en el mismo clic, y un temblor del ratón movía el texto.
+  El panel sigue mostrando la primera elegida mientras siga seleccionada.
+- **Compositor: cada herramienta muestra su cursor** (#79, @pacaeiro):
+  mano para desplazar, lupa para el zoom, cruz para las que colocan o
+  dibujan. Tras pasar el ratón por un marco se quedaba la flecha de
+  Seleccionar.
+- **Compositor: una vista redimensionada se vuelve a pintar sola** (#80,
+  @pacaeiro) con el render automático activo, sin pulsar Actualizar.
+- **Compositor: una Planta sigue siendo una Planta** (#82, @pacaeiro): al
+  editar una vista fija (Planta, Frontal, Posterior, Izquierda, Derecha)
+  solo se desplaza, se hace zoom y se gira; ya no se puede orbitar y
+  dejarla distinta de lo que dice su panel. Ahí el botón central desplaza,
+  como en la lámina (#83). Isométrica, escenas y perspectivas siguen
+  orbitando.
+- **Los paneles Propiedades, BIM y Terreno se abren siempre al arrancar.**
+  Solo queda cerrado el que quites desde el menú Ventana, y así se
+  recuerda; una barra plegada al cerrar vuelve desplegada.
+
+## [0.5.1] — 2026-09-23
+
+**La revisión 4 de Rafael, las tandas de @pacaeiro y la de los usuarios.**
+Lo que dibujas dentro de un grupo se ve al momento; una puerta que arranca
+del suelo atraviesa el muro; copiar y pegar entre ventanas; Orientar caras;
+Zoom extensión que encuadra de verdad; la órbita que ya no se queda pegada
+en Windows; Primera persona, de @sherodtaylor; y una barra de estado con
+sitio para leer la pista de cada herramienta.
+
+### Añadido
+- **Copiar y pegar entre ventanas** (#76, @pacaeiro): lo copiado en un
+  IngeTrazo se pega en otro abierto al lado, con sus materiales, texturas,
+  grupos y componentes. **Archivo ▸ Nueva ventana** (Ctrl+Mayús+N) abre un
+  segundo IngeTrazo para tener dos diseños lado a lado.
+- **Deshacer y Rehacer en la barra Principal**, justo después del puntero,
+  con iconos propios (flecha curva, contorno en tinta y relleno naranja
+  suave).
+- **Orientar caras** (#77, @pacaeiro): clic derecho sobre
+  una cara ▸ Orientar caras, y todas las conectadas se voltean para mirar
+  hacia el mismo lado que ella. Vale para sólidos y para superficies
+  abiertas; se detiene donde tres caras comparten una arista.
+- **Reconstruir caras (planas) sobre la selección** (#73, @pacaeiro): con
+  caras seleccionadas en un mismo plano, rehace solo ese plano aunque el
+  resto del modelo sea 3D. Sin selección hace lo de siempre (todo el
+  dibujo, si es plano).
+- **Primera persona: pasear el modelo como en un videojuego**, junto a
+  Caminar y no en su lugar (Cámara ▸ Primera persona y la barra Paseo).
+  W/A/S/D caminan y se mueven de lado, Q/E bajan y suben, Mayús corre y
+  Alt atraviesa paredes; arrastrar con el botón derecho (o el izquierdo)
+  gira la cabeza a un ritmo fijo por píxel, que se ajusta en
+  Preferencias ▸ General ▸ Sensibilidad al mirar con el ratón (1–100,
+  25 por defecto). Paredes, escalones y altura
+  del ojo son los de Caminar. Mientras la herramienta está activa, esas
+  seis letras son suyas y no cambian de herramienta; con Ctrl siguen
+  siendo atajos (Ctrl+S guarda). El puntero se oculta al mirar y, donde
+  la plataforma lo permite, vuelve a su sitio tras cada movimiento —
+  en Wayland no se puede mover, así que al llegar al borde se suelta y
+  se vuelve a arrastrar.
+
+### Cambiado
+- **Acerca de IngeTrazo reconoce a todos los que aportan**, en unos
+  créditos que suben despacio y sin parar, como al final de una película:
+  Pedro Caeiro, Rafael García, Ahsan Mehmood, dafrobozao (portugués),
+  Félix Riestra (versión para Mac) y Sherod Taylor (Primera persona), y un
+  agradecimiento a todos los que prueban y reportan.
+- **La barra de abajo deja sitio a la pista de la herramienta** (Marco): el
+  nombre de la herramienta va delante de la pista en vez de ocupar su propio
+  hueco, las coordenadas UTM salen compactas (completas al pasar el cursor),
+  la pista cortada se lee entera al pasar el cursor, y las pestañas de
+  láminas tienen un ancho máximo con flechas ◀ ▶ si no caben.
+- **En la ventana del modelo, las pestañas son Modelo | última lámina:**
+  la pestaña de lámina lleva a la última que abriste (en la Lámina 2 →
+  Modelo → vuelves a la Lámina 2); todas las láminas se ven como pestañas
+  en el compositor.
+
+### Corregido
+- **Una cara pegada encima de otra se une con ella** (#73, @pacaeiro):
+  como un rectángulo dibujado ahí, parte el plano en sus regiones en vez
+  de quedar una cara superpuesta a la otra. Pegar al lado no toca nada.
+- **Un grupo girado conserva sus ejes al copiarlo y pegarlo** (#78,
+  @pacaeiro): la copia salía con los ejes alineados al mundo.
+- **La órbita ya no se queda pegada al ratón** (Andrés Rodríguez, Windows 11).
+  Si el aviso de «soltaste el botón» se perdía (algunos ratones y paneles
+  táctiles en Windows, un clic en otra ventana, cambiar de herramienta con
+  el teclado a media órbita), cada movimiento del ratón giraba la vista,
+  con cualquier herramienta. Ahora un movimiento sin botón pulsado, o
+  elegir otra herramienta, termina la órbita.
+- **Lo que dibujas dentro de un grupo o componente se ve al momento**
+  (Rafael, revisión 4). Las líneas nuevas no aparecían hasta salir del
+  grupo: la parte del dibujo que guarda las aristas de los grupos no se
+  enteraba de los cambios en el grupo abierto. Pasaba desde la 0.4.0.
+- **Una puerta que arranca del suelo ya atraviesa el muro** (Rafael,
+  revisión 4). Al empujarla, la cara de abajo del muro queda en forma de
+  «C», y el motor probaba un punto que podía caer en el hueco de la C:
+  creía que esa cara estaba fuera del sólido, la borraba y el empuje se
+  rechazaba, dejando un nicho ciego. Dependía del orden interno de las
+  caras, por eso a veces funcionaba y a veces no, con o sin booleanas.
+- **El muñeco de escala solo ofrece el punto de sus pies** para enganchar,
+  y ya no sirve de referencia para «Desde el punto»: sus esquinas, cabeza y
+  ejes robaban las inferencias del dibujo cercano.
+- **Sobre una arista, «Desde el punto» ya no se pierde** (Rafael, revisión 4:
+  «hasta el final no me llega»): con un punto adquirido, la arista ofrece el
+  punto alineado con él en vez de «En arista» a secas.
+- **La prolongación de una arista aparece aunque haya una pared detrás del
+  cursor** (Rafael: «a veces te bloquea y a veces no»). Se decidía con el
+  punto de esa pared; ahora se mira también en pantalla, solo al prolongar
+  la arista desde su propia línea. Medido en el arnés de inferencias
+  (997 920 casos): cambian 1120, ninguno le quita un punto con nombre.
+- **Al cerrar la ventana, lo copiado sigue en el portapapeles** para pegarlo
+  en otra ventana; de paso se evita un cierre brusco del proceso.
+- **Los cuadros de «escribe un nombre» ya no salen diminutos** con el
+  título cortado («Crear…»): tienen un ancho mínimo (Rafael, revisión 4).
+- **Desfase sobre una línea suelta lo explica:** si la línea no tiene nada
+  unido a sus extremos, lo dice así y la deja seleccionada para que se vea.
+- **El panel derecho ya no salta al seleccionar:** Info de entidad guarda
+  un alto fijo (antes crecía o encogía con cada selección y arrastraba
+  Capas, Escenas y Materiales), y si has bajado el panel, lo que miras se
+  queda quieto aunque cambie algo de arriba. Tampoco salta la lista de
+  materiales al crear un componente.
+- Faltaba traducir el mensaje de la Cinta «Punto guía a … con su segmento»,
+  y el panel «En el modelo» no se refrescaba al salir de un grupo.
+- **«Deshacer grupo» se llama ahora «Explotar»**: el
+  nombre anterior se confundía con Deshacer.
+- **Redondeo 3D daba «Conflicting cuts» en un cubo girado y aplastado**
+  (#74, @pacaeiro). Al girar la pieza fuera de los ejes, las dos aristas de
+  cada esquina calculaban el mismo punto con una milésima de milímetro de
+  diferencia por redondeo numérico, justo lo que el programa tomaba como
+  dos puntos distintos. Ahora redondea igual que el cubo recto, en
+  cualquier orden de aristas.
+- **Zoom extensión encuadra también las figuras** como el muñeco de escala:
+  en un documento nuevo, donde
+  solo está él, no hacía nada.
+- **Zoom extensión a veces no hacía nada.** Encuadraba la esfera que
+  envuelve al modelo, que no depende de hacia dónde miras: tras orbitar o
+  pasar a una vista estándar, repetirlo daba la misma cámara y el modelo
+  podía quedar en un 10 % de la pantalla (una torre vista desde arriba).
+  Ahora encuadra el modelo tal como lo ve la cámara en ese momento y según
+  la forma de la ventana, que en vertical además lo cortaba por los lados.
+  Y una lámina renderizada ya no le deja a Zoom extensión los límites de
+  su propia vista.
+
+## [0.5.0] — 2026-09-23
+
+**Sólidos, ejes locales y Mac.** Las herramientas de sólidos
+(Revestimiento exterior, Unión, Sustraer, Recortar, Intersecar, Dividir) e
+Intersecar caras, pedidas por Rafael; los ejes locales de grupos y
+componentes, el pendiente grande de @pacaeiro (#44), con Cambiar ejes y el
+`.skp` que los conserva; la tanda de pacaeiro del 22 de septiembre;
+el tema claro o el del sistema; y la primera versión empaquetada para
+macOS, gracias a @felixriestra.
+
+### Añadido
+- **Versión para macOS** (PR #64, @felixriestra): un `IngeTrazo.app`
+  empaquetado en `.dmg` para Apple Silicon, que abre `.igz` y `.skp` con
+  doble clic. Sin firma de Apple: la primera vez, clic derecho ▸ Abrir.
+- **Ejes locales en grupos y componentes** (#44, @pacaeiro):
+  cada grupo recuerda hacia dónde mira cuando se mueve, gira, escala,
+  voltea, copia o explota, y se guarda en el `.igz`. Al entrar a editarlo
+  se ven SUS ejes, en su origen, y la inferencia de eje, las flechas, el
+  suelo, el rectángulo, círculos y arcos y las vistas estándar los siguen,
+  nivel por nivel en grupos anidados. Crear grupo o componente dentro de
+  uno girado sale alineado con él. El cuadro de selección y la caja de
+  Escala se alinean a los ejes del objeto. Clic derecho ▸ **Cambiar ejes**
+  (origen, rojo, verde) sin mover la geometría; en un componente cambia la
+  definición y todas sus copias se quedan en su sitio.
+- **Herramientas de sólidos** (pedidas por Rafael y en la
+  #61): Revestimiento exterior, Unión, Sustraer, Recortar, Intersecar y
+  Dividir sobre grupos y componentes sólidos. Barra propia, Herramientas ▸
+  Revestimiento exterior / Herramientas de sólidos, y el clic derecho sobre
+  una selección de sólidos. Clic en el sólido 1 y luego en el 2 (en
+  Sustraer y Recortar el primero es el que corta), o preselección; el
+  cursor dice «1», «2» o «no es un sólido». El resultado es siempre un
+  grupo, cada cara conserva su material y las del corte toman el del
+  cortador; un paso de deshacer. Info de entidad muestra «Grupo sólido» y
+  su volumen. Motor: manifold3d (Apache-2.0), dependencia nueva.
+- **Intersecar caras** (Edición ▸ Intersecar caras ▸ Con el modelo / Con la
+  selección / Con el contexto, y en el clic derecho): aristas donde se
+  cruzan las caras, en el contexto que se está editando, partiendo sus
+  caras — la forma clásica de recortar sin sólidos.
+- **Tema claro, y tema que sigue al sistema.** Preferencias ▸ General ▸
+  **Tema**: Oscuro (el de siempre, sigue por defecto), Claro, o Igual que
+  el sistema — este toma el modo claro u oscuro del escritorio (GNOME, KDE,
+  Windows 10/11 y macOS) y cambia en vivo cuando el usuario lo cambia, sin
+  reiniciar. El visor 3D conserva su estilo y la lámina sigue siendo papel;
+  el fondo detrás de la hoja se aclara en el tema claro.
+- **Material «por defecto» (sin material) en Pintar** (#47, @pacaeiro):
+  un cuadro partido crema/gris-azul junto a «Activo» lo elige, el
+  cuentagotas lo toma de una cara sin pintar, y pintar con él quita el
+  material de la cara, de su revés o de un grupo entero.
+
+- **Rectángulo rotado con transportadores** (#70,
+  @pacaeiro): uno en la primera esquina para la dirección de la primera
+  arista (marcas cada 15° cerca del borde; el cuadro acepta `largo` o
+  `largo;ángulo`) y otro perpendicular a esa arista para el ancho y su
+  inclinación, que ahora se lee sobre el plano del transportador — antes
+  solo salía tumbado (0°/180°) salvo cambiando la vista. Shift fija la
+  inclinación. De paso, un ángulo tecleado en un documento en milímetros
+  ya no se lee como longitud (`3;90` daba 0,09°).
+
+### Cambiado
+- **Alt alterna el cuentagotas de Pintar**:
+  un toque lo activa y se queda hasta tomar un material (entonces vuelve
+  al balde) o hasta otro toque. Mantener Alt y hacer clic también muestrea;
+  Alt+Tab no cuenta. El puntero lo sigue siempre, también cuando la barra
+  de menús se quedó con el teclado (#47).
+- **Explotar quita UN nivel** (#72, @pacaeiro): los grupos y componentes
+  anidados salen enteros, en su sitio y seleccionados, en vez de
+  deshacerse también; uno sin pintura propia toma la del contenedor.
+- **Planos de sección** (#62, @pacaeiro): al colocarlos llevan el color de
+  la inferencia (rojo/verde/azul según el eje, magenta si no), el activo se
+  ve naranja y los demás gris claro (el seleccionado, con marco continuo),
+  y colocar uno vuelve a encender los cortes si estaban apagados.
+
 ### Arreglado
+- **Las caras de un cilindro casi no se podían seleccionar** (#71,
+  @pacaeiro): las costuras suaves, que no se dibujan, y las aristas del
+  otro lado del sólido se llevaban el clic — a zoom normal, el 100 % del
+  costado. Un clic ya solo toma aristas que se ven.
+- **Al explotar un grupo pintado, el revés de sus caras perdía la
+  pintura** (#47).
+- **La goma no borraba textos** (#66, @pacaeiro): ahora los borra por las
+  letras o por la guía, y los resalta antes del clic.
+- **Preferencias ▸ Unidades salía en español con la interfaz en inglés**
+  (#65, @pacaeiro): los nombres de las unidades se traducen.
+- **macOS: el visor fallaba en cada cuadro con la herramienta Paseo** (#67):
+  la etiqueta de la altura de ojos no tiene punto 3D y el visor intentaba
+  proyectarla igual. Y el README decía `cd ingetrazo/app`, carpeta que no
+  existe en el repositorio.
 - **La ventana del puente MCP daba un comando que no sobrevivía a la
   sesión en los paquetes de Linux.** Con el AppImage enseñaba la ruta del
   montaje temporal (`/tmp/.mount_…`), que muere al cerrar la app; con el
@@ -35,7 +983,7 @@ modelo, rectángulo desde el centro, desfase de aristas, el vértice
 compartido) y la tanda nueva del 20 y 21 de septiembre: Dividir, la
 cámara guardada en el documento, la barra de progreso al abrir, los
 planos de sección que terminan y se colorean por eje, los pasos de
-deshacer, el scroll de las listas, Pintar con la regla de SketchUp
+deshacer, el scroll de las listas, Pintar con la regla de siempre
 (cara sobre grupo), lo oculto que se puede clicar, la cota lineal, el
 imán de ejes en todas las herramientas de dibujo. De la tercera revisión
 de Rafael: la cinta saca guías desde los ejes y deja puntos guía con su
@@ -58,7 +1006,7 @@ recientes, por fin.
   iguales; un arco o círculo se mide a lo largo de su cadena, se corta en
   las marcas k/N y queda en **N arcos independientes**, cada uno
   seleccionable por su cuenta (un círculo dividido en cuatro son cuatro
-  cuartos, como en SketchUp). Las caras que bordean reciben los vértices
+  cuartos). Las caras que bordean reciben los vértices
   nuevos. Un solo paso de deshacer.
 - **Pasos de deshacer configurables** (issue #56, @pacaeiro): Preferencias
   ▸ General ▸ «Pasos de deshacer» (200 por defecto; 0 = sin límite). Cada
@@ -108,7 +1056,7 @@ recientes, por fin.
   Objetos/Geometría ocultos quita de la selección lo que deja de verse:
   el contorno naranja de la caja fantasma sobrevivía al interruptor.
   (3) **Una cara nueva mira hacia arriba, y si es vertical hacia la cámara
-  que la dibujó** (regla de SketchUp): una cara cerrada con Línea o el
+  que la dibujó**: una cara cerrada con Línea o el
   contorno del Desfase salían con el reverso hacia fuera según el orden
   en que se hubiera recorrido el ciclo. (4) **La cinta enseña «En el eje»**
   (cuadradito rojo, verde o azul) al pasar por un eje antes del primer
@@ -124,7 +1072,7 @@ recientes, por fin.
   5 m del origen» antes de dibujar nada. Y desde un punto con nombre
   (extremo, origen, intersección, centro), el segundo clic o el valor
   tecleado deja un **punto guía con su segmento discontinuo** hasta el
-  punto de partida, como el «segmento guía» de SketchUp que él usa para
+  punto de partida, el «segmento guía» que él usa para
   centrar círculos o marcar el vuelo de un alero; de un punto a otro
   punto con nombre solo mide, y un punto medio no cuenta como punto
   («es ficticio»). El segmento se pinta con la profundidad del modelo,
@@ -138,14 +1086,14 @@ recientes, por fin.
   (2) **El cuentagotas actualiza el material activo** del panel
   Materiales (la casilla «Activo» y los campos de tamaño). (3) **Pintar un
   grupo o componente desde fuera pinta el objeto entero**, con la regla
-  de SketchUp tal como la describió: el material de una cara va por
+  tal como la describió: el material de una cara va por
   delante del del contenedor; solo las caras con el material por defecto
   visten el del grupo, por las dos caras; y al explotar, esas se quedan
   con él. El material del contenedor viaja en el `.igz`, sobrevive a
   copiar/pegar, y dos instancias del mismo componente pueden ir de
   colores distintos. El cuentagotas sobre una cara por defecto de un
   grupo pintado toma el color del grupo. Al exportar a `.skp` el material
-  va en el grupo o la instancia, como lo guarda SketchUp. Pendiente: las
+  va en el grupo o la instancia. Pendiente: las
   exportaciones de malla (.dae/.obj/.glTF) y el resumen por materiales.
 - **Lo oculto que la vista enseña se puede clicar** (issue #53, @pacaeiro:
   «we cannot select them with mouse click, only by window selection»). El
@@ -168,7 +1116,7 @@ recientes, por fin.
   aristas conectadas —polilínea abierta o contorno cerrado sin cara— y la
   desplaza a la distancia arrastrada o tecleada, con esquinas a inglete;
   y si seleccionas las aristas antes de activar la herramienta, el primer
-  clic ya empieza el desfase, como en SketchUp. Una cadena recta se
+  clic ya empieza el desfase. Una cadena recta se
   rechaza diciendo por qué (no tiene plano).
 - **El imán de ejes de Línea llega a arcos, círculos, polígonos,
   rectángulo girado, Texto y Cota** (issues #52 y #51, @pacaeiro: «The
@@ -184,7 +1132,7 @@ recientes, por fin.
 - **La cota del modelo puede ser lineal, no solo alineada** (issue #50,
   @pacaeiro: «When a line is rotated some degrees, the Dimension tool
   should be able to measure aligned (as it does now), but also linear»).
-  Como en SketchUp, lo decide dónde tiras la línea de cota: en escuadra
+  Lo decide dónde tiras la línea de cota: en escuadra
   con el segmento, alineada; pasado un extremo hacia un lado, la vertical
   (la extensión en Y); por encima o por debajo, la horizontal (en X); y en
   3D lo mismo con Z. La vista previa ya enseña cuál va a salir y el texto
@@ -194,8 +1142,8 @@ recientes, por fin.
 - **El Transportador soltaba todo menos el bloqueo de plano al
   recargarlo** (issue #48, @pacaeiro: «define a Hard Axis (Z) and Reload
   the command (Shift+H) — the Hard Axis keeps active»). Volver a pulsar
-  Shift+H con la herramienta en la mano es el «empezar de nuevo» de
-  SketchUp y ahora suelta también la flecha; Esc igual.
+  Shift+H con la herramienta en la mano es el «empezar de nuevo»
+  y ahora suelta también la flecha; Esc igual.
 - **Línea acepta longitudes negativas** (issue #58, @pacaeiro). `-2` y
   Enter dibuja 2 m en sentido contrario al cursor, como ya hacían Mover y
   Copiar. Solo el cero se rechaza.
@@ -401,7 +1349,7 @@ las barras de herramientas que dejaban a Paseo al fondo de la columna.
   un componente. Si el vértice desaparece, el extremo se queda donde
   estaba; un extremo en un punto medio o sobre una arista se queda fijo.
   Con **Mover** sobre una cota, la **línea de cota se desplaza** y las
-  líneas de referencia se estiran desde sus vértices, como en SketchUp.
+  líneas de referencia se estiran desde sus vértices.
   Y **Extremos** en Estilo de cota: flechas (lo que trae un documento
   nuevo), trazos oblicuos o ninguno; un documento anterior conserva sus
   trazos. Las tres cosas que echó en falta el primer usuario del vídeo de
@@ -480,7 +1428,7 @@ hora sobre la 0.4.x (Rafael 3D, 16-09) se repartió en dos releases: esta es
 la del **modelo** —los tres bugs y los cinco pedidos— y la siguiente será la
 de las **láminas**. Lo grande aquí es la **cámara de paseo** para mirar los
 interiores, **ocultar objetos** y capas que se usan de verdad, el **texto 3D
-editable** letra a letra, y una inferencia que SketchUp no tiene: la
+editable** letra a letra, y una inferencia nueva: la
 ventana de la pared de al lado **a la altura** de la primera. Y de propina,
 la issue #34 de @pacaeiro sobre los snaps bajo bloqueo, cazada el mismo día
 con el arnés recién ampliado — sexto punto ciego que le encuentra a esa red.
@@ -488,7 +1436,7 @@ Marco probó cada fase en vivo antes de cerrarla («me encanta»).
 
 ### Añadido
 - **Cámara de paseo: Situar cámara, Caminar y Mirar alrededor**, las
-  tres de SketchUp (Rafael, 13:00: «pasitos» para mirar los interiores),
+  tres herramientas de paseo (Rafael, 13:00: «pasitos» para mirar los interiores),
   hechas a su documentación oficial y a la grabación de Marco de su barra
   de estado. Menú Cámara y barra **Paseo**. **Situar cámara**: clic en un
   punto y el ojo se pone 1,68 m encima mirando en horizontal (la caja de
@@ -512,16 +1460,16 @@ Marco probó cada fase en vivo antes de cerrarla («me encanta»).
   donde esto esté oculto»—: cada objeto lleva ahora una identidad estable
   en el `.igz` y la escena guarda cuáles estaban ocultos; una escena
   guardada antes de esta versión no toca nada. Las **caras** también se
-  ocultan (Marco: «en SketchUp también puedes ocultar caras»); sus
-  aristas se quedan, como allí.
+  ocultan (Marco: «también puedes ocultar caras»); sus
+  aristas se quedan.
 - **Cámara ▸ Objetos ocultos / Geometría oculta**, los dos interruptores
-  de SketchUp: lo oculto se dibuja como una **rejilla transparente** (las
+  de siempre: lo oculto se dibuja como una **rejilla transparente** (las
   aristas, punteadas) y vuelve a poder seleccionarse, que es el camino a
   **Edición ▸ Mostrar ▸ Seleccionado** y al «Mostrar» del clic derecho.
   Los dos interruptores viajan en el documento y en las escenas.
 - **Cambiar de capa donde se busca** (Rafael, 39:00: «no sé cómo cambiar
   el objeto de capa… las propiedades… botón derecho… no lo veo»). **Info
-  de entidad** tiene ahora el campo **Capa** de SketchUp: muestra la de la
+  de entidad** tiene ahora el campo **Capa**: muestra la de la
   selección («(varias)» si mezcla) y elegir otra la mueve. El **clic
   derecho** gana un submenú **Capa** con las del documento, la actual
   marcada, y «Capa nueva…». El botón **Asignar selección** del panel de
@@ -529,44 +1477,43 @@ Marco probó cada fase en vivo antes de cerrarla («me encanta»).
   lo dice en vez de callar (es lo que le «funcionó a la segunda»). Los
   tres caminos pasan por un mismo comando con deshacer, y una capa que no
   existe se crea al asignarla.
-- **Posicionar textura: el transportador de SketchUp en el pin verde**
-  (Rafael, 04:30: «en SketchUp te bloquea a los 0, a los 45 y a los 90… si
+- **Posicionar textura: un transportador en el pin verde**
+  (Rafael, 04:30: «te bloquea a los 0, a los 45 y a los 90… si
   no es un poco a ojo»; Marco trajo capturas y una grabación, y se calcó
   fotograma a fotograma). Al arrastrar el pin verde aparece sobre el pin
-  rojo el pequeño transportador azul de SketchUp: el disco con el brazo
+  rojo el pequeño transportador azul: el disco con el brazo
   de partida cruzándolo, la cuña del ángulo barrido, un cuadradito en
   cada brazo, la línea punteada del brazo actual que atraviesa el pin
   verde y sigue, y el ángulo en la caja de medidas. El giro se pega a
   pasos de 15° desde donde empezó (0, 15, 30, 45… 90: los 0/45/90 de
   Rafael están entre ellos), esté el cursor donde esté; Ctrl mientras
-  arrastras lo deja libre («Ctrl = Sin ajuste», como allí).
-- **Texto 3D como en SketchUp: cada letra es un grupo, y el texto se
+  arrastras lo deja libre («Ctrl = Sin ajuste»).
+- **Texto 3D: cada letra es un grupo, y el texto se
   edita.** El texto llega como un componente con un grupo por letra
-  («que cada letra aparezca como grupo, como lo hace SketchUp»), así que
+  («que cada letra aparezca como grupo»), así que
   una letra se empuja, se pinta o se mueve sola: doble clic entra al texto
-  como a cualquier grupo (lo de SketchUp), y dentro, doble clic en la
+  como a cualquier grupo, y dentro, doble clic en la
   letra. Y el texto **sigue siendo texto**: clic derecho ▸ **Editar texto
   3D…** reabre el cuadro con lo que se escribió —texto, fuente, negrita,
   cursiva, altura, extrusión— y lo regenera en el mismo sitio, con el mismo
   giro y la misma escala. Deshacer lo devuelve como estaba. El `.igz`
   guarda los parámetros, así que un texto de hace un mes se reabre igual
-  de editable. Rafael lo pidió sabiendo que «SketchUp tampoco» lo hace.
+  de editable. Rafael lo pidió sabiendo que es poco común.
   Y una salvaguarda: **si tocas una letra a mano** —la empujas, la pintas,
   la borras, la mueves sola— el texto pasa a ser geometría y «Editar texto
   3D…» se apaga con el motivo; regenerarlo habría tirado ese trabajo.
   Mover o girar el texto entero no cuenta.
-- **Editar grupo** en el menú contextual, la entrada de SketchUp: la misma
+- **Editar grupo** en el menú contextual: la misma
   puerta que el doble clic.
 - **«A la altura del punto»: la ventana de la pared de al lado, a la misma
   altura que la primera** (Rafael, 02:20: «que la línea guía se extendiera
-  por aquí y yo pudiera fijar la ventana aquí… tampoco eso lo hace
-  SketchUp»). Memoriza la esquina de una ventana —el mouse quieto un
+  por aquí y yo pudiera fijar la ventana aquí»). Memoriza la esquina de una ventana —el mouse quieto un
   instante encima— y ve a **otra pared**, perpendicular o la de enfrente:
   al pasar a su altura, el cursor se engancha a una línea punteada que
   recorre esa pared a esa altura, con el rótulo **A la altura del punto**.
   Dos guías llevan el ojo desde la esquina hasta el cursor: por su pared
   hasta la esquina del cuarto y desde ahí por la nueva, cada una del color
-  de su eje. SketchUp no lo hace porque su «Desde el punto» es la LÍNEA
+  de su eje. El «Desde el punto» clásico no lo hace porque es la LÍNEA
   del eje que pasa por la esquina, que a una pared perpendicular la toca
   en un solo punto y a la de enfrente nunca; esto es el PLANO horizontal
   por la esquina cortado con la pared, que es una línea entera. Los otros
@@ -603,7 +1550,7 @@ Marco probó cada fase en vivo antes de cerrarla («me encanta»).
   (flechas X/Z y Shift; 570 240 celdas).
 - **Pulsar de nuevo la tecla de la herramienta la reinicia** (issue #34,
   punto 5): con una línea a medias, `L` suelta el primer punto y los
-  bloqueos, como en SketchUp. Antes no hacía nada.
+  bloqueos. Antes no hacía nada.
 - **«Desde el punto» ya no se sale de la cara.** Con una esquina
   memorizada y el cursor sobre una cara, la línea del eje que pasaba por
   la esquina *por el aire* —paralela a esa cara, o atravesándola en
@@ -648,7 +1595,7 @@ Marco probó cada fase en vivo antes de cerrarla («me encanta»).
   los dos lados** conserva cada pintura en su lado; una pintada por un
   solo lado sigue la corrección, como hasta ahora (un rectángulo pintado
   que se tira hacia arriba sigue saliendo caja pintada por abajo). El
-  «Invertir caras» del usuario no cambia: es el de SketchUp.
+  «Invertir caras» del usuario no cambia: es el de siempre.
 - **El cuadro de Texto 3D no aceptaba «20» de extrusión** (Rafael): pedía
   metros con un tope de 10 m, y nadie extruye un rótulo veinte metros.
   Altura y extrusión se piden ahora en **centímetros**.
@@ -747,13 +1694,13 @@ forma que no sabe sostener.
 ## [0.4.3] — 2026-09-17
 
 **La release de openskp 1.3.0 y de los cuatro reportes de Pedro Caeiro.**
-El lector de SketchUp pasa de nuestro fork a la versión oficial 1.3.0, y
+El lector de `.skp` pasa de nuestro fork a la versión oficial 1.3.0, y
 con ella un modelo que llevaba tiempo sin abrir —`edificio.skp`, de
-SketchUp 8— abre. Se midió archivo por archivo antes de dar el salto: 214
+la versión 8— abre. Se midió archivo por archivo antes de dar el salto: 214
 del corpus de Marco, 212 idénticos, uno rescatado, ninguno perdido, y el
-`.skp` que exportamos sale byte a byte igual a través del SDK de Trimble.
-Lo demás son las cuatro issues que @pacaeiro abrió probando IngeTrazo
-como si fuera SketchUp, y la vista en perspectiva que Marco pidió para sus
+`.skp` que exportamos sale igual, comprobado con archivos de referencia.
+Lo demás son las cuatro issues que @pacaeiro abrió probando IngeTrazo,
+y la vista en perspectiva que Marco pidió para sus
 láminas.
 
 ### Añadido
@@ -764,23 +1711,23 @@ láminas.
   propias, independientes del modelo. En perspectiva no hay escala, así que
   el rótulo dice «SIN ESCALA» en vez de inventar un 1:N.
 - **Girar + Ctrl: «3x» y «/3» reparten copias en círculo** (issue #24). La
-  matriz polar de SketchUp, hermana de la que Mover estrenó en la 0.4.2:
+  matriz polar, hermana de la que Mover estrenó en la 0.4.2:
   con Ctrl pulsado, teclear `3x` deja tres copias a múltiplos del ángulo y
   `/3` tres que lo dividen. Re-teclear rehace la matriz y todo cabe en un
   solo deshacer.
 - **Ctrl en la Cinta y el Transportador: medir, o medir Y marcar**
-  (issue #29). En la Cinta, Ctrl recorre los tres modos de SketchUp —líneas
+  (issue #29). En la Cinta, Ctrl recorre tres modos —líneas
   guía, puntos guía, medida sola— y los puntos guía son una entidad que no
   teníamos. En el Transportador alterna guía sí/no. Es un modo, no un
   modificador de un solo clic: se mantiene entre operaciones y vuelve a
   guías al recoger la herramienta, como el original. El `+` junto al cursor
-  dice en cuál estás antes de hacer clic, que en SketchUp es toda la
+  dice en cuál estás antes de hacer clic, y es toda la
   interfaz de este conmutador.
 - **La barra de estado lleva los modificadores de la herramienta**, no solo
   su nombre: la Cinta muestra «Ctrl = [líneas guía] / puntos guía / medida»
   con el modo activo entre corchetes, y durante una operación aparece el
-  «Alt = inferencias (…)» con su estado. Uno por fase, que es como lo hace
-  SketchUp — apilarlos no cabía en la barra.
+  «Alt = inferencias (…)» con su estado. Uno por fase
+  — apilarlos no cabía en la barra.
 - **Las personas de fuera del proyecto cuyo trabajo está dentro, acreditadas**
   en `AUTHORS`, en el README y en Ayuda ▸ Acerca de IngeTrazo: Pedro
   Caeiro (@pacaeiro) por los reportes y el PR #21, Rafael García Rodríguez
@@ -796,13 +1743,12 @@ láminas.
   entero por un marco malo: lo imprime como «actualiza la vista», sigue y
   al terminar nombra las láminas que hay que mirar.
 - **openskp 1.3.0, la versión oficial** (antes iba pineado a nuestro fork).
-  Con ella abre `edificio.skp`, de SketchUp 8, que caía en el lector de
+  Con ella abre `edificio.skp`, de la versión 8, que caía en el lector de
   archivos grandes. Verificado sobre 214 archivos del corpus de Marco:
   212 idénticos, ese rescatado, ninguno perdido. El que queda no abre con
   ninguna de las dos versiones y no cuenta como corpus: es salida de
-  nuestro propio exportador de cuando estaba roto, y el SDK de Trimble
-  también lo rechaza. Y la exportación a `.skp`
-  produce el mismo archivo medido con el SDK de Trimble (179 trozos, 35
+  nuestro propio exportador de cuando estaba roto. Y la exportación a `.skp`
+  produce el mismo archivo comprobado con archivos de referencia (179 trozos, 35
   materiales, 147 componentes en ambos sentidos).
 - **Los snaps funcionan en las dos direcciones con un eje bloqueado**
   (issue #27). Con el eje rojo fijado, la misma esquina se imantaba viniendo
@@ -817,11 +1763,11 @@ láminas.
 - **Alt ya no roba las inferencias al cambiar de ventana** (issue #26).
   @pacaeiro usa Alt+Tab todo el día y cada vez perdía las inferencias.
   Ahora la tecla solo actúa con una operación en marcha, que es cuando
-  SketchUp la ofrece, y el conmutador dura esa operación y no la sesión.
+  tiene sentido, y el conmutador dura esa operación y no la sesión.
   Se actúa en la PULSACIÓN y se traga la suelta: es la suelta la que hace
   que la barra de menús tome el foco, y por ahí se perdían cinco de cada
   seis toques.
-- **Exportar ▸ SketchUp con un grupo clásico dentro de un contenedor** ya
+- **Exportar ▸ `.skp` con un grupo clásico dentro de un contenedor** ya
   no revienta: sin matriz propia, la colocación es la identidad.
 - **Una capa apagada en el archivo .skp llega apagada.** Se leía un atributo
   que no existe en openskp, así que todas entraban visibles.
@@ -832,11 +1778,11 @@ láminas.
 
 ## [0.4.2] — 2026-09-16
 
-**Lo que pidió Pedro Caeiro, y exportar a SketchUp otra vez.** @pacaeiro,
-delineante, prueba IngeTrazo como si fuera SketchUp y anota cada gesto que
-no responde igual: aquí caen sus cuatro pendientes de inferencia y
-herramientas, todos paridad con SketchUp. Y el arreglo que no podía
-esperar: Exportar ▸ SketchUp moría en el .exe, el AppImage, el tar y el
+**Lo que pidió Pedro Caeiro, y exportar a `.skp` otra vez.** @pacaeiro,
+delineante, prueba IngeTrazo y anota cada gesto que
+no responde como espera: aquí caen sus cuatro pendientes de inferencia y
+herramientas. Y el arreglo que no podía
+esperar: Exportar ▸ `.skp` moría en el .exe, el AppImage, el tar y el
 snap.
 
 ### Añadido
@@ -855,13 +1801,13 @@ snap.
   segunda guía paralela: así se traza una retícula. Antes solo valían las
   aristas de la malla, porque el selector de la cinta no veía guías. El
   cruce de dos guías (la X verde) es un punto y mide en vez de tirar.
-- **El transportador se inclina con clic y arrastre** (issue #10). Como en
-  SketchUp: clic en el vértice y arrastre fijan el eje del instrumento a lo
+- **El transportador se inclina con clic y arrastre** (issue #10):
+  clic en el vértice y arrastre fijan el eje del instrumento a lo
   largo del arrastre, fuera de los planos ortogonales; el ángulo se mide y
   la guía se coloca en ese plano inclinado. Rotar ya tenía el gesto; ahora
   lo comparten. Un clic seco conserva el plano inferido.
 - **Flecha «abajo»: el círculo perpendicular a una arista** (issue #10,
-  segunda parte). El bloqueo magenta de SketchUp (2016+) en el círculo, el
+  segunda parte). El bloqueo magenta en el círculo, el
   polígono, el rectángulo, el rectángulo girado y los arcos: antes del
   primer clic, `↓` con el cursor sobre una arista fija el plano de dibujo
   perpendicular a ella, y sobre una cara, paralelo a ella; `↓` otra vez lo
@@ -871,7 +1817,7 @@ snap.
   sin rotar el círculo después.
 
 ### Arreglado
-- **Exportar ▸ SketchUp volvía «[Errno 2] No such file or directory:
+- **Exportar ▸ `.skp` volvía «[Errno 2] No such file or directory:
   …\_internal\openskp\_scaffold\blank_v17.skp»** en el instalador de
   Windows, el AppImage, el tar y el snap (solo el Flatpak se salvaba).
   openskp escribe cada .skp sobre un andamio que carga como dato del
@@ -880,8 +1826,7 @@ snap.
   los datos y el `--check` de cada paquete exige el andamio, así que la CI
   del release atrapa esta clase de olvido.
 - **Mover y Rotar ya no infieren contra sí mismos** (issue #19). Lo que se
-  está arrastrando o girando queda fuera de los candidatos del snap —como
-  hace SketchUp con las entidades en movimiento—, así que arrastrar una
+  está arrastrando o girando queda fuera de los candidatos del snap, así que arrastrar una
   cara a lo largo de un muro ya no se pega a las esquinas de la propia
   cara. En modo copia el original no se mueve y no se excluye nada.
 - **Dos guías que se cruzan vuelven a dar su intersección** (PR #21 de @pacaeiro, issue #18). El motor de
@@ -907,7 +1852,7 @@ snap.
 
 ## [0.4.0] — 2026-09-15
 
-**La inferencia a la altura de SketchUp, el visor más rápido, y las tres
+**La inferencia al día, el visor más rápido, y las tres
 herramientas que faltaban.** Revisión 1 de Rafael (partes B y C) y una tarde
 de mediciones sobre la plaza de Yanque.
 
@@ -920,7 +1865,7 @@ de mediciones sobre la plaza de Yanque.
   que «cuenta» lo que hizo sin mandar código recibe un toque y los sistemas
   agénticos de Groq (compound) ya no se ofrecen. Las capturas viajan en JPEG
   de 640 px (un cuarto de los tokens de antes).
-- **Redondear (fillet)** — la herramienta que SketchUp no tiene. Clic en una
+- **Redondear (fillet)**. Clic en una
   arista (o las aristas seleccionadas), mueve el cursor para fijar el radio o
   tecléalo, clic: la arista se convierte en una tira tangente a las dos caras;
   las tapas reciben el arco, las aristas encadenadas (el borde de una losa) se
@@ -928,7 +1873,7 @@ de mediciones sobre la plaza de Yanque.
   parche esférico. Cóncavas también. Lo que no se puede redondear lo dice y no
   toca el modelo. «Ns» fija los segmentos.
 - **Posicionar textura** (clic derecho en una cara con imagen ▸ Textura ▸
-  Posicionar): los cuatro pines de SketchUp — rojo mueve, verde escala y
+  Posicionar): los cuatro pines — rojo mueve, verde escala y
   rota, azul escala y cizalla —, la textura semitransparente con su retícula
   de baldosas, levantar un pin con un clic para clavarlo en una esquina, menú
   interno Listo / Restablecer / Voltear / Girar / Deshacer, Enter termina y
@@ -944,14 +1889,14 @@ de mediciones sobre la plaza de Yanque.
   y el cubo sobre otra cara de distinto plano aplican el mismo tamaño de
   baldosa y el mismo giro (las caras coplanarias siguen recibiendo la
   posición exacta).
-- **Arco que redondea esquinas como SketchUp**: al empezar sobre una arista la
+- **Arco que redondea esquinas**: al empezar sobre una arista la
   vista previa es el arco tangente (cian, «Tangente a la arista»); en la arista
   contigua, a la misma distancia del vértice, se clava y se vuelve magenta;
   doble clic ahí dibuja el arco y **recorta la esquina sola**; doble clic
   cerca de otra esquina repite el mismo radio; Alt deja los tramos.
   «Semicírculo» en la fase de curvatura y «Ns» segmentos (también rehace el
   arco recién dibujado).
-- **Inferencia como en SketchUp**: rectángulo, círculo, polígono y arcos
+- **Inferencia**: rectángulo, círculo, polígono y arcos
   dibujan en el plano más perpendicular a la vista (de pie junto al
   horizonte, planos al orbitar arriba) y **enseñan el plano en el cursor**
   (anillo o cuadradito, en el color del eje con las flechas); **«Desde el
@@ -1028,7 +1973,7 @@ de mediciones sobre la plaza de Yanque.
   por cuadro (~11 ms) y la caja del grupo editado (~9 ms) en los arrastres.
 
 ### Cambiado
-- **Barra de estado a la SketchUp**: una sola pista para la herramienta y el
+- **Barra de estado más clara**: una sola pista para la herramienta y el
   paso en que está («Clic en el punto final, o teclea la longitud y Enter…»),
   en vez de la tira con todos los atajos a la vez.
 - **La bandeja aprovecha el ancho**: las muestras de materiales y los
@@ -1160,7 +2105,7 @@ Software.
 **El norte del proyecto.** La plaza de Yanque, dibujada a escuadra con los
 ejes, se había girado 33,5° como grupo para encajar en el satélite — y las
 vistas Frontal, Derecha e Izquierda dejaron de significar nada. Esta
-versión hace lo que SketchUp: el modelo se queda en sus ejes y el que gira
+versión hace lo habitual: el modelo se queda en sus ejes y el que gira
 es el mapa. Y llegan los tres primeros arreglos de un colaborador externo,
 @pacaeiro, con sus issues: el bloqueo de eje con Shift, las guías
 punteadas y los iconos grandes.
@@ -1169,8 +2114,8 @@ punteadas y los iconos grandes.
 - **Norte del proyecto: el mapa gira bajo el modelo, no el modelo bajo el
   mapa.** En el panel Terreno/Mapa base, el campo **Norte** dice hacia dónde
   queda el norte verdadero, en grados en sentido horario desde el eje verde
-  (0° = el verde apunta al norte; la misma convención que Solar North de
-  SketchUp). Al cambiarlo giran por debajo el mapa base, el terreno 3D, las
+  (0° = el verde apunta al norte; la convención habitual del norte solar).
+  Al cambiarlo giran por debajo el mapa base, el terreno 3D, las
   rutas y puntos importados, la lectura UTM de la barra de estado y el sol
   de las sombras; el modelo no se toca, así que las vistas estándar, los
   bloqueos de eje y el rectángulo siguen a escuadra. Se guarda en el `.igz`
@@ -1196,8 +2141,8 @@ punteadas y los iconos grandes.
   grados fuera del eje— en vez del eje X, Y o Z exacto. Ahora bloquea el
   eje inferido, conservando el sentido.
 - **Las guías de construcción salían a línea llena en vez de punteadas.** La
-  Cinta de medir trazaba sus guías continuas, sin el punteado fino de
-  SketchUp. El lápiz siempre fue `Qt.DashLine`: lo que fallaba era la ESCALA.
+  Cinta de medir trazaba sus guías continuas, sin el punteado fino
+  esperado. El lápiz siempre fue `Qt.DashLine`: lo que fallaba era la ESCALA.
   Una guía se recorta en `_clip_segment_front` justo delante del plano de la
   cámara (con `w = 1e-3`), de modo que su extremo se proyecta a MILLONES de
   píxeles del origen, y el trazador de trazos de Qt —que trabaja en punto
@@ -1217,20 +2162,20 @@ punteadas y los iconos grandes.
 ## [0.3.18] — 2026-09-12
 
 **Mobiliario en la plaza.** La segunda sesión sobre la Plaza Yanque: los
-grupos anidados como los hace SketchUp, la pileta, el arco, la luminaria y
+grupos anidados, la pileta, el arco, la luminaria y
 el campesino traídos de sus propios archivos como componentes, y las caras
 con dos lados. Casi todo lo de abajo lo reportó Marco usándolo, con captura
 o con el modelo vivo delante; el rendimiento se midió antes de publicar
 (`scripts/bench_session.py`): +0,3 ms por cuadro, nada que se sienta.
 
 ### Añadido
-- **Grupos anidados, como en SketchUp.** Un grupo puede contener grupos, y
+- **Grupos anidados.** Un grupo puede contener grupos, y
   se entra a ellos por niveles: doble clic para bajar, Esc o clic afuera
   para subir uno, con la ruta a la vista en la barra de estado («Editando
   Plaza ▸ Jardinera ▸ Banca»). Dentro de un grupo, un clic selecciona a su
   HIJO —no al contenedor entero— y no se puede agarrar el resto del modelo.
   «Crear grupo» ya no se niega cuando hay grupos en la selección: los adopta,
-  y la parte suelta pasa a ser la malla del contenedor, como SketchUp.
+  y la parte suelta pasa a ser la malla del contenedor.
 
   Hasta ahora entrar a un contenedor lo **horneaba**: sus hijos se fundían
   en una sola malla. Marco lo vivió con su plaza — nueve grupos convertidos
@@ -1240,7 +2185,7 @@ o con el modelo vivo delante; el rendimiento se midió antes de publicar
 - **Importar otro documento .igz como componente.** Archivo ▸ Importar ▸
   «Documento IngeTrazo como componente (.igz)…»: el archivo entero llega
   como UN componente que se coloca con un clic, como el Import de un .skp
-  en SketchUp — la pérgola, el arco y la luminaria dibujados en sus propios
+  — la pérgola, el arco y la luminaria dibujados en sus propios
   archivos entran en la plaza con sus grupos (anidados, como estaban), sus
   materiales y sus capas. Se sostiene por su origen, así que las zapatas
   dibujadas bajo el suelo quedan bajo el suelo. Los face-me del archivo
@@ -1250,7 +2195,7 @@ o con el modelo vivo delante; el rendimiento se midió antes de publicar
 - **El .igz conserva los nombres de los grupos.** Nunca los escribía: cada
   documento reabierto renumeraba sus grupos y una «Pérgola» volvía como
   «Group 7» (pendiente conocido). Los nuevos no repiten un número guardado.
-- **Inferencia «Centro», como en SketchUp.** Al pasar el cursor por la
+- **Inferencia «Centro».** Al pasar el cursor por la
   cara de un círculo (la tapa de un cilindro, un pavimento con un arco en
   el borde, un hueco circular) o por la arista de la curva, el centro
   queda marcado con un punto verde y el cursor snapea a él («Centro») para
@@ -1262,15 +2207,15 @@ o con el modelo vivo delante; el rendimiento se midió antes de publicar
   una jardinera anidada hasta la esquina del pavimento de afuera no daba el
   punto verde: el índice de picking solo conocía el grupo abierto. Ahora
   lleva el modelo entero — lo de afuera atenuado se puede snapear y tapa lo
-  que queda detrás, como en SketchUp, y sigue sin poderse seleccionar. Con
+  que queda detrás, y sigue sin poderse seleccionar. Con
   «Ocultar» el resto del modelo, lo que no se dibuja tampoco atrae al
   cursor.
 
-- **Las caras tienen dos lados, y se pinta el que se clica.** Como en
-  SketchUp: el cubo pinta el lado bajo el cursor, y el otro conserva el
+- **Las caras tienen dos lados, y se pinta el que se clica.**
+  El cubo pinta el lado bajo el cursor, y el otro conserva el
   color de reverso del estilo (el azul grisáceo que delata una cara al
   revés). Un material translúcido —cristal, agua, una malla raschel, una
-  hoja calada— se ve igual por los dos lados, también como en SketchUp.
+  hoja calada— se ve igual por los dos lados.
   Hasta ahora toda pintura aparecía por los dos lados («si a una cara le
   aplico un color o textura también se aplica a su revés», Marco). El
   cuentagotas toma el lado que muestreas; el `.igz` guarda el reverso
@@ -1305,13 +2250,12 @@ o con el modelo vivo delante; el rendimiento se midió antes de publicar
 - **Empujar/Tirar ya no atraviesa un grupo cerrado.** Un dibujo agrupado se
   dejaba empujar sin abrirlo, y si era un componente la herramienta abría a
   tus espaldas una sesión de edición y compartía el resultado a TODAS las
-  copias. Se escribió como «mejor que SketchUp» en junio; usándolo en obra
+  copias. Se escribió como una mejora en junio; usándolo en obra
   resultó ser lo contrario, porque el modelo cambia donde no apuntaste
   (Marco, 2026-09-10). Ahora la cara de un grupo cerrado ni se sombrea al
   pasar por encima —sombrearla es prometer un empuje que no va a ocurrir— y
   el clic responde diciendo qué hacer: abrir el grupo con doble clic y
-  empujar adentro. Es la regla de SketchUp, dicha por su propia guía de
-  solución de problemas. Dentro del grupo no cambia nada, incluido que
+  empujar adentro. Dentro del grupo no cambia nada, incluido que
   editar una copia de un componente sigue llegando a todas.
 - **El aviso del límite del empuje dice qué se frenó y por qué.** Decía
   «Equidistancia limitada a 0.02 m» en mitad de un push — el nombre de otra
@@ -1329,17 +2273,17 @@ reportó Marco mientras dibujaba, con captura o con el modelo vivo delante.
 
 ### Añadido
 - **Purgar capas y materiales sin usar**, con su botón en cada bandeja y
-  deshacible. Nació de un import de SketchUp del que se borró casi todo: las
+  deshacible. Nació de un import de `.skp` del que se borró casi todo: las
   capas del dibujo grande seguían ahí cuando ya no quedaba ni una cara suya.
   Las capas vuelven a su posición original al deshacer, no al final de la
   lista.
-- **Tinte de textura**: cambiarle el color a un material texturizado, como el
-  colorize de SketchUp. Tono y saturación del color elegido sobre la
+- **Tinte de textura**: cambiarle el color a un material texturizado, como un
+  colorize. Tono y saturación del color elegido sobre la
   luminosidad de la imagen; el original se guarda al lado, así que se puede
   cambiar el tinte cuantas veces se quiera o quitarlo. Viaja dentro del
   `.igz`.
 - **El tercer paso del rectángulo rotado es anchura Y ÁNGULO**, como el
-  transportador de SketchUp: con la base tumbada, escribir `3;90` levanta el
+  transportador: con la base tumbada, escribir `3;90` levanta el
   rectángulo de pie. Era la única forma de dibujar un rectángulo
   perpendicular y no estaba.
 - **Equidistancia hacia adentro de verdad.** Al meterse hacia adentro de una
@@ -1348,7 +2292,7 @@ reportó Marco mientras dibujaba, con captura o con el modelo vivo delante.
   de arreglo planar: lo que colapsa se elimina, y si la figura se parte en
   dos —una U estrecha— salen las dos piezas.
 - **Invertir caras en el menú del botón derecho.** Estaba solo en el menú
-  Edición, que no es donde se busca: SketchUp la pone sobre la propia cara.
+  Edición, que no es donde se busca: va sobre la propia cara.
 
 ### Corregido
 - **Tres teclas no hacían nada: `H`, `O` y `F2`.** Lo reportó `@pacaeiro`
@@ -1358,11 +2302,10 @@ reportó Marco mientras dibujaba, con captura o con el modelo vivo delante.
   para las dos. Al medirlo aparecieron dos más del mismo molde: `O` la
   peleaban el Arco por centro y Orbitar, y `F2` estaba registrada dos
   veces, una por el botón de la barra y otra por la entrada del menú
-  Cámara. Ahora las teclas de cámara son las de SketchUp — Orbitar `O`,
-  Desplazar `H`, Zoom `Z` y **Zoom a extensión `Mayús+Z`**, que allá es la
-  suya y aquí faltaba (`F2` sigue valiendo). Las dos herramientas que
-  cedieron su tecla —que en SketchUp no tienen ninguna asignada de
-  fábrica— quedan en `Mayús+H` el Transportador y `Mayús+O` el Arco por
+  Cámara. Ahora las teclas de cámara son las habituales — Orbitar `O`,
+  Desplazar `H`, Zoom `Z` y **Zoom a extensión `Mayús+Z`**, que aquí
+  faltaba (`F2` sigue valiendo). Las dos herramientas que
+  cedieron su tecla quedan en `Mayús+H` el Transportador y `Mayús+O` el Arco por
   centro. Y un test nuevo recorre todas las acciones de la ventana y falla
   si dos comparten atajo: la misma regla que el cargador de extensiones ya
   le aplicaba a los plugins, que nadie había aplicado a las teclas propias
@@ -1408,9 +2351,8 @@ reportó Marco mientras dibujaba, con captura o con el modelo vivo delante.
   suelo da exactamente lo mismo que antes.
 
 ### Cambiado
-- **`P` es Empujar/Tirar, como en SketchUp** (pedido de Marco). Era `U`, y
-  la `P` estaba gastada en alternar perspectiva/paralela — que en SketchUp
-  no tiene tecla ninguna. La `U` no se tira: sigue valiendo como segundo
+- **`P` es Empujar/Tirar** (pedido de Marco). Era `U`, y
+  la `P` estaba gastada en alternar perspectiva/paralela. La `U` no se tira: sigue valiendo como segundo
   atajo del MISMO comando, para no romper un año de memoria muscular. La
   proyección pasa a `Mayús+P`, la misma regla que el Transportador y el
   Arco por centro: la que cede se queda con `Mayús`+su tecla.
@@ -1439,7 +2381,7 @@ ni una referencia ni se dejaba seleccionar.
   desapercibido.
 - **Al orbitar, el eje vertical estaba invertido.** Arrastrar hacia abajo
   bajaba la cámara en vez de asomarte por encima del modelo, al revés que
-  SketchUp, Blender o FreeCAD — y al revés que el propio encuadre de
+  Blender o FreeCAD — y al revés que el propio encuadre de
   IngeTrazo, que sí agarra el modelo en los dos ejes. Lo reportaron dos
   usuarios el mismo día (issue #7 y un correo), ninguno capaz de decir
   cuál de los dos ejes era el malo, que es exactamente lo que se siente
@@ -1465,7 +2407,7 @@ ni una referencia ni se dejaba seleccionar.
 montó la lámina del arco de Yanque de principio a fin y cada tropiezo
 salió al momento: el compositor gana reglas y guías como en QGIS, mover
 la selección con las flechas, seleccionar lo que está debajo, el texto
-de la cota que se arrastra como en LayOut, la línea de terreno, el fondo
+de la cota que se arrastra, la línea de terreno, el fondo
 del papel en los marcos, cotas que siguen activas, Shift ortogonal, una
 barra de lámina con iconos, exportar a PNG/JPG, guardar desde el
 compositor y el menú de las pestañas de lámina. El modelo gana el
@@ -1542,7 +2484,7 @@ actualizaba el marco y el cambio a Modelo que había que pulsar dos veces.
   modelo se desancla al moverla, igual que al arrastrarla (Marco,
   2026-09-08: «una vez seleccionado debería mover con las teclas de
   desplazamiento, así como lo hace QGIS»).
-- **El texto de la cota se mueve como en LayOut.** Se arrastra con el
+- **El texto de la cota se mueve.** Se arrastra con el
   ratón agarrándolo por las letras y se queda donde lo dejes; la línea
   de cota no se mueve (arrastrar la línea sigue moviendo la cota entera).
   En el panel, «A lo largo de la línea» lo pone sobre el centro, fuera
@@ -1550,22 +2492,22 @@ actualizaba el marco y el cambio a Modelo que había que pulsar dos veces.
   o derecha), y «Devolver el texto a su sitio» deshace el arrastre. Un
   texto centrado solo abre la línea cuando está en su sitio automático
   (Marco, 2026-09-08: «me refería al lado de la cota, ya sea derecho o
-  izquierdo; es más, en SketchUp LayOut se puede mover el texto de la
+  izquierdo; es más, en otros programas se puede mover el texto de la
   cota»). Además, «Posición del texto» gana «al costado de la línea» y
   «al otro costado»: la etiqueta entera a un lado de la línea sin
   cruzarla, útil en cotas verticales con texto horizontal.
 - **Las flechas fijan el plano de dibujo del círculo, polígono,
-  rectángulo y arcos**, como en SketchUp: antes del primer clic, → fija
+  rectángulo y arcos**: antes del primer clic, → fija
   el plano normal a X (YZ), ← el normal a Y (XZ), ↑ el normal a Z (XY);
   la misma flecha otra vez lo libera y Esc también. Una etiqueta arriba a
   la izquierda, del color del eje, lo indica. La figura gasta el
   bloqueo, y tras el primer clic las flechas vuelven a ser el bloqueo de
   eje de siempre (Marco, 2026-09-08: «quiero dibujar un círculo en el
-  plano ZX… en SketchUp me restringe a qué plano quiero dibujar apretando
+  plano ZX… en otros programas me restringe a qué plano quiero dibujar apretando
   las teclas de desplazamiento»).
 - **Shift fija en horizontal o vertical el segundo punto de una cota** (y
   de una línea, flecha, línea de terreno o el siguiente punto de una cota
-  en cadena): el Orto de AutoCAD, el bloqueo de eje de SketchUp. Gana el
+  en cadena): el Orto de AutoCAD. Gana el
   eje más cercano al cursor; el imán a la geometría sigue actuando y el
   punto cae sobre el eje fijado; al pulsar o soltar Shift la goma elástica
   se actualiza sin mover el ratón. El tercer clic de la cota (la
@@ -1648,7 +2590,7 @@ vez, ejemplos reales para abrir: cuatro documentos de la plaza de Yanque.
   herramienta Seleccionar, arrastrar desde la hoja vacía dibuja un cuadro:
   de izquierda a derecha (azul, continuo) selecciona lo que queda
   encerrado; de derecha a izquierda (verde, a trazos) lo que toca — la
-  regla de SketchUp y AutoCAD. Mayús alterna, Ctrl añade, Mayús+Ctrl
+  regla de AutoCAD. Mayús alterna, Ctrl añade, Mayús+Ctrl
   quita, como en el modelo; los ítems bloqueados no entran; un clic en
   la hoja vacía sigue vaciando la selección.
 
@@ -1810,7 +2752,7 @@ en la selección.
   en un cajetín demasiado chico la letra vuelve a encoger como antes. Las
   filas se miden columna por columna, así que en un cajetín de varias
   columnas las líneas horizontales siguen alineadas.
-- **Mayús+clic ahora quita de la selección** (regla de SketchUp, pedido de
+- **Mayús+clic ahora quita de la selección** (pedido de
   Marco: «debería haber una opción para deseleccionar ciertas líneas o
   planos»). Con la herramienta Seleccionar, **Mayús+clic alterna** lo que
   toca — una arista o cara ya seleccionada sale de la selección, una que
@@ -1822,13 +2764,13 @@ en la selección.
 
 ## [0.3.12] — 2026-09-05
 
-**La release de las láminas profesionales y del `.skp` que SketchUp
-guarda.** Una sesión entera sobre la lámina real de la pileta de Yanque:
+**La release de las láminas profesionales y del `.skp` que se puede
+guardar.** Una sesión entera sobre la lámina real de la pileta de Yanque:
 el estilo vectorial dibuja con tres plumas y rellena los cortes, el marco
 lleva rótulo numerado, la planta marca por dónde va cada sección, y llegan
 las cotas de nivel, las cotas en cadena, las llamadas de detalle y las
 fotos en círculo con borde desvanecido. Por debajo, el exportador `.skp`
-que SketchUp abre, muestra con las texturas en su sitio y **guarda** — con
+que el programa de destino abre, muestra con las texturas en su sitio y **guarda** — con
 openskp fijado al fork `tuxiasumari/openskp@73ba410` mientras upstream
 revisa el PR #266 que lo lleva todo.
 
@@ -1855,7 +2797,7 @@ revisa el PR #266 que lo lleva todo.
 - **Grosores por clase y poché en el estilo vectorial de las láminas.** La
   vista «Vector (líneas ocultas)» ya no dibuja todo con una sola pluma: el
   paso de líneas ocultas clasifica cada trazo como corte de sección,
-  perfil (siluetas y contornos contra el fondo, los «perfiles» de SketchUp)
+  perfil (siluetas y contornos contra el fondo, los «perfiles»)
   o arista entre dos caras, y cada clase sale con su pluma (0,50 / 0,35 /
   0,18 mm por defecto, ajustables por marco en el panel). Donde el plano de
   sección corta un sólido cerrado, el marco rellena el corte (sólido o
@@ -1865,7 +2807,7 @@ revisa el PR #266 que lo lleva todo.
   exportación DXF de la vista reparte las clases en capas `VISTA`,
   `VISTA-PERFIL` y `VISTA-CORTE` para la tabla de plumas de IngeCAD.
 - **Rótulo de vista profesional.** El título del marco (antes una línea
-  centrada «Planta — 1:100») tiene ahora tres estilos: el de LayOut
+  centrada «Planta — 1:100») tiene ahora tres estilos: el de burbuja
   (burbuja numerada con la lámina debajo, título en negrita, «ESC. 1:N» y
   una línea de base hasta el borde del marco, con subtítulo opcional),
   la barra vertical de los planos brasileños (franja a la izquierda del
@@ -1934,12 +2876,12 @@ revisa el PR #266 que lo lleva todo.
   coinciden, y en los dos se puede escribir el paso que se quiera.
 - **Las figuras «cara a la cámara» viajan al `.skp`.** Las personas 2D y los
   recortes (la figura Sumari, los bañistas) se quedaban fuera del archivo y
-  desaparecían en SketchUp. Ahora salen como componentes en la convención de
-  SketchUp (pies en el origen, frente hacia −Y, colocados en su ancla) y, si
+  desaparecían al abrirlo. Ahora salen como componentes en la convención del
+  formato (pies en el origen, frente hacia −Y, colocados en su ancla) y, si
   el escritor de openskp lo admite, con el comportamiento «siempre mirar a la
   cámara»; con el escritor actual quedan de pie mirando a −Y.
 - **Las aristas ocultas viajan al `.skp`.** El exportador nunca marcaba una
-  arista como oculta, así que SketchUp dibujaba un marco negro alrededor de
+  arista como oculta, así que el programa de destino dibujaba un marco negro alrededor de
   cada figura recortada (y de las hojas importadas cuyo contorno es la
   máscara de su textura). Una cara con todas sus aristas ocultas en
   IngeTrazo sale con ellas ocultas.
@@ -1950,12 +2892,12 @@ revisa el PR #266 que lo lleva todo.
   piezas que son copias de otra, trasladadas o giradas sobre el eje
   vertical, dentro de una malla o entre grupos; las verifica punto por
   punto y cara por cara (pintura y texturas), y las escribe como una
-  definición colocada N veces, como hace SketchUp. La piscina baja de 70 a
+  definición colocada N veces. La piscina baja de 70 a
   27 MB con las mismas caras en los mismos sitios.
-- **Solo viajan las capas en uso.** Al guardar en SketchUp Web, Purgar
+- **Solo viajan las capas en uso.** Al guardar el archivo en el programa de destino, Purgar
   tiraba 8 de las 10 capas de la piscina, todas vacías, y la capa por
-  defecto de IngeTrazo ya es la «Layer0» de SketchUp. El resto del ahorro
-  que da SketchUp al guardar es su formato comprimido: nuestros archivos
+  defecto de IngeTrazo ya es la «Layer0» del formato. El resto del ahorro
+  que se ve al volver a guardarlo es el formato comprimido: nuestros archivos
   llevan las mismas caras, definiciones y texturas.
 
 ### Corregido
@@ -1965,57 +2907,57 @@ revisa el PR #266 que lo lleva todo.
   lienzo y la selección vivía en los ítems que se destruían. Ahora la
   reconstrucción recuerda qué modelos estaban seleccionados y los vuelve a
   seleccionar.
-- **SketchUp ya puede GUARDAR un `.skp` exportado.** Los archivos abrían bien
-  pero cualquier intento de guardarlos, en SketchUp Web o con el SDK, acababa
+- **Un `.skp` exportado ya se puede GUARDAR.** Los archivos abrían bien
+  pero cualquier intento de guardarlos acababa
   en «Guardado fallido». El escritor de openskp numeraba los identificadores
   persistentes de cada sección desde 1 y dejaba corto el contador de la
-  cabecera, así que SketchUp encontraba duplicados al cargar, los renumeraba
-  y luego no podía serializar el modelo. Cazado con el SDK a partir de un caso
+  cabecera, así que el lector encontraba duplicados al cargar, los renumeraba
+  y luego no podía serializar el modelo. Cazado con archivos de referencia a partir de un caso
   mínimo (una definición de 1 cara seguida de otra de 3). El escritor del fork
   numera en una sola secuencia (arreglo propuesto a upstream); mientras tanto
   IngeTrazo corrige el contador del archivo al guardar y escribe las figuras
   al final, con lo que la pileta y la piscina se guardan.
 ### Corregido
-- **Las texturas de un `.skp` exportado se ven en SketchUp donde IngeTrazo
-  las dibujó.** Tres causas, cazadas con el conversor del SDK de SketchUp
-  como oráculo. Dos están en el escritor de openskp y se compensan hasta
+- **Las texturas de un `.skp` exportado se ven donde IngeTrazo
+  las dibujó.** Tres causas, cazadas comparando con archivos de
+  referencia. Dos están en el escritor de openskp y se compensan hasta
   que upstream las arregle (una sonda lo comprueba en cada exportación): la
   matriz de cada cara pineada se escribía en la base «primera arista» y
-  SketchUp la lee en la base «Z × normal», así que cada cara salía girada el
+  el formato la lee en la base «Z × normal», así que cada cara salía girada el
   ángulo de su primera arista (el tronco de la palmera, miles de caras, hecho
   añicos); y los UV pineados no se multiplicaban por el tamaño aplicado del
-  material, que SketchUp divide al leer, así que una textura de 2 m salía 78
+  material, que el lector divide al leer, así que una textura de 2 m salía 78
   veces más grande (el agua de la pileta, un azul plano). La tercera era de
-  IngeTrazo: la proyección por defecto del visor usaba otra base que la de
-  SketchUp y en muros que miran a +Y o −X la textura se veía girada 180°
+  IngeTrazo: la proyección por defecto del visor usaba otra base que la del
+  formato y en muros que miran a +Y o −X la textura se veía girada 180°
   respecto de lo que sale en el archivo. Ahora hay una sola receta
-  (`core.texture.projection_basis`, la de SketchUp) para el visor, los
+  (`core.texture.projection_basis`, la del formato) para el visor, los
   exportadores OBJ/glTF/DAE, la vista previa de pegar y el importador.
-- **Un `.skp` exportado ya no muestra caras lavanda en SketchUp.** IngeTrazo
-  pinta las dos caras de una superficie y SketchUp solo la que nombra el
+- **Un `.skp` exportado ya no muestra caras lavanda.** IngeTrazo
+  pinta las dos caras de una superficie y el formato solo la que nombra el
   archivo, así que toda cara vista desde atrás (las bancas, el bajo del
   techo, las hojas de la palmera) salía con el color de reverso por defecto.
   Ahora el reverso lleva el mismo material y la misma posición de textura
   que el frente, o el suyo propio cuando la cara venía pintada distinta por
   cada lado.
-- **Las caras horizontales ya no salen con la textura girada 90° en
-  SketchUp.** La base de proyección de SketchUp (Z × normal) es discontinua
+- **Las caras horizontales ya no salen con la textura girada 90°.**
+  La base de proyección del formato (Z × normal) es discontinua
   justo en la vertical, y la normal de una cara horizontal calculada en
   float32 traía un ruido de hasta 6e-4 que la mandaba a la base equivocada
-  (Marco: encimeras, pisos y losas de la piscina). Medido con el SDK:
-  SketchUp usa los ejes del mundo mientras la inclinación es menor que 1e-3.
+  (Marco: encimeras, pisos y losas de la piscina). Medido con archivos de referencia:
+  el formato usa los ejes del mundo mientras la inclinación es menor que 1e-3.
   Ahora la receta única usa esa misma tolerancia, la normal de cada cara se
   acumula en doble precisión y el exportador expresa los pins contra el
   plano que el propio escritor guarda en el archivo.
   Y las caras que miran hacia abajo (el bajo de losas, bancas y encimeras)
-  salían 180° giradas: SketchUp les da la base (−X, +Y), no la (X, −Y) que
+  salían 180° giradas: el formato les da la base (−X, +Y), no la (X, −Y) que
   asumía el lector; medido igual y corregido en la misma receta.
 
 ## [0.3.11] — 2026-09-04
 
 **Release de Windows y de intercambio.** Todo lo que salió al probar la
 0.3.10 en la máquina de un amigo de Marco: un `.igz` con texturas que no
-abría, un `.skp` exportado que SketchUp rechazaba, el visor arrastrándose
+abría, un `.skp` exportado que no abría, el visor arrastrándose
 en una laptop con dos gráficas, y un puente MCP que no podía conectarse
 porque el paquete no llevaba el servidor. Cinco de los seis arreglos tienen
 la misma raíz: el nombre de la textura en caché crecía en cada guardado.
@@ -2043,18 +2985,17 @@ la misma raíz: el nombre de la textura en caché crecía en cada guardado.
   IngeTrazo.
 
 ### Corregido
-- **El `.skp` exportado por la 0.3.10 no abría en SketchUp cuando una
+- **El `.skp` exportado por la 0.3.10 no abría cuando una
   textura venía de la caché con nombre apilado.** Mismo origen que el fallo
   de Windows: el nombre de 250 caracteres caía en la carpeta temporal, la
   ruta superaba el límite de 255 del escritor de openskp y este fallaba con
   la imagen ya escrita a medias; el «respaldo a color» se escribía encima y
-  SketchUp rechazaba el archivo entero (SUResult 12). Ahora cada textura se
+  el archivo entero quedaba ilegible. Ahora cada textura se
   copia a una carpeta temporal con su nombre corto antes de entregarla al
   escritor, la ruta de tu máquina ya no viaja dentro del `.skp`, y una
   imagen ilegible pasa a color sin tocar el escritor. Las texturas BMP, TIFF
-  o GIF (las que traen los modelos importados de SketchUp) se reconvierten a
-  PNG en vez de perderse. Validado con el conversor oficial del SDK de
-  SketchUp.
+  o GIF (las que traen los modelos `.skp` importados) se reconvierten a
+  PNG en vez de perderse.
 - **Un `.igz` con texturas dejaba de abrir en Windows tras varios guardados.**
   Cada guardado envolvía el nombre de la imagen en un prefijo de hash más
   (`textures/<hash>-<hash>-…-sumari.png`): al cabo de unos veinte guardados la
@@ -2069,8 +3010,8 @@ la misma raíz: el nombre de la textura en caché crecía en cada guardado.
 
 **Release urgente.** La 0.3.9 salió con dos fallos serios que este release
 cierra: el instalador de Windows no arrancaba instalado en Archivos de
-programa, y cualquier modelo con una figura «face-me» de malla (la Susan de
-SketchUp) dejaba el visor en blanco. Además entra todo lo trabajado desde
+programa, y cualquier modelo con una figura «face-me» de malla (la Susan de los
+`.skp`) dejaba el visor en blanco. Además entra todo lo trabajado desde
 entonces sobre las láminas y el modelado de Marco.
 
 ### Añadido
@@ -2080,7 +3021,7 @@ entonces sobre las láminas y el modelado de Marco.
   paso. Empujar/Tirar sobre una copia desde fuera también edita la
   definición. Para cambiar una sola copia, antes: clic derecho ▸ Hacer
   único. Mirar dentro y salir sin tocar nada no cambia nada.
-- **Medidas en pulgadas y pies junto a metros**, como SketchUp: `2"`, `2in`,
+- **Medidas en pulgadas y pies junto a metros**: `2"`, `2in`,
   `1'`, `1ft`, `1'6"`, `3/4"`, `1 1/2"` (o `1-1/2"`), mezclables por campo
   (`1 1/2";3 1/2"` es una tabla de 2×4; `3,2;1'6";10cm` un
   desplazamiento). Los números sin sufijo siguen siendo metros.
@@ -2107,7 +3048,7 @@ entonces sobre las láminas y el modelado de Marco.
 
 ### Corregido
 - **La 0.3.9 dejaba el visor en blanco** con cualquier modelo que trajera una
-  figura «face-me» de malla (la Susan de SketchUp y similares, importadas
+  figura «face-me» de malla (la Susan y similares, importadas
   del .skp): al dibujarla faltaba una coordenada del ancla y el pintado
   fallaba en cada frame. Se veían las etiquetas y los ejes, nada más.
 - **El zoom «se trababa» cerca del modelo**: con la distancia de órbita en
@@ -2116,7 +3057,7 @@ entonces sobre las láminas y el modelado de Marco.
   1 % del tamaño del modelo por muesca y acercar sigue deslizando la vista
   hacia el punto del cursor.
 - **Una línea dibujada sobre la cara de un grupo no se podía seleccionar**:
-  el clic siempre tomaba el grupo. Como en SketchUp, la línea visible gana
+  el clic siempre tomaba el grupo. La línea visible gana
   al objeto que tiene detrás; una línea escondida detrás del bloque deja
   el clic al bloque.
 - **Mover, medir y acotar hacia la cara de otro objeto**: el punto cae ahora
@@ -2143,11 +3084,11 @@ entonces sobre las láminas y el modelado de Marco.
 ## [0.3.9] — 2026-09-03
 
 **La release de las láminas.** Dos días de dogfooding sobre las láminas
-reales de la pileta de Yanque: el compositor se puso a la altura de LayOut,
-y Sígueme a la de SketchUp.
+reales de la pileta de Yanque: el compositor se puso a la altura de un programa de láminas
+profesional, y Sígueme también.
 
 ### Añadido
-- **Sígueme como en SketchUp: arrastra y ve la extrusión.** Haz clic en el
+- **Sígueme: arrastra y ve la extrusión.** Haz clic en el
   perfil y mueve el cursor por el camino tocando sus aristas: el camino se
   resalta en rojo y la extrusión se previsualiza en vivo, ingletes
   incluidos; clic (o soltar un arrastre real) al llegar al final, `Esc`
@@ -2180,7 +3121,7 @@ y Sígueme a la de SketchUp.
 - **Agrupar, desagrupar y bloquear** ítems de lámina (Ctrl+G,
   Ctrl+Mayús+G, Ctrl+L): seleccionar un miembro selecciona el grupo y
   arrastrar la selección es un solo paso de deshacer.
-- **La sesión LayOut del compositor.** Auto-render de los marcos cuando el
+- **La sesión de láminas del compositor.** Auto-render de los marcos cuando el
   modelo cambia; edición de la vista dentro del marco (doble clic: pan,
   órbita, zoom, Encuadrar modelo); escalas personalizadas del documento;
   texto editable en cotas (doble clic, `<>` = medida) y estilo de texto de
@@ -2192,8 +3133,8 @@ y Sígueme a la de SketchUp.
   ({proyecto} {autor} {lamina} {escala} {escena} {fecha} {archivo}…);
   organizar (alinear, distribuir, duplicar); etiquetas con línea guía; y
   edición in situ de textos y etiquetas con doble clic.
-- **Anotaciones con capa** en el modelo (cotas y textos guía), estilo
-  SketchUp: una capa «Anotaciones» oculta en una escena da el modelo
+- **Anotaciones con capa** en el modelo (cotas y textos guía), :
+  una capa «Anotaciones» oculta en una escena da el modelo
   limpio para la lámina.
 - Las páginas de Propiedades del ítem mantienen sus filas juntas arriba y
   se desplazan si no caben.
@@ -2219,7 +3160,7 @@ y Sígueme a la de SketchUp.
   modelo.** La normal era fija (+X/+Y/+Z): con la cámara al sur, un plano
   en Y delante de la fuente ocultaba la fuente entera de un clic. Ahora el
   plano colocado con un eje bloqueado (o sobre el suelo) mira a la cámara y
-  oculta TU lado, como SketchUp: lo que hay detrás queda hasta que lo metes
+  oculta TU lado: lo que hay detrás queda hasta que lo metes
   con Mover.
 - **Cursiva, fuente y alineación de los bloques de texto no se aplicaban**
   desde el panel (las casillas estaban; el cambio nunca llegaba al ítem).
@@ -2232,7 +3173,7 @@ y Sígueme a la de SketchUp.
 - **Sígueme en un camino cerrado con el perfil en una esquina**: el barrido
   arrancaba por el tramo equivocado y el primer anillo colapsaba; además el
   perfil dejaba sus aristas sueltas. Ahora recorre el camino en el sentido
-  perpendicular al perfil y consume el perfil, como SketchUp.
+  perpendicular al perfil y consume el perfil.
 - **Rayos X y alámbrico dejan imantar a través de las caras** (antes el
   agua de una pileta tapaba los puntos de detrás para la Cota).
 - **El texto guía ya no cruza sus palabras** cuando la etiqueta queda a la
@@ -2247,7 +3188,7 @@ y Sígueme a la de SketchUp.
   la vista» se colaba en marcos que sí tenían imagen, y la lectura del FBO
   llegaba premultiplicada; ambos corregidos.
 - **Cota de lámina anclada** que medía la distancia 3D entre sus puntos:
-  ahora mide la distancia proyectada en el plano de la vista, como LayOut.
+  ahora mide la distancia proyectada en el plano de la vista.
 - **Export .skp**: el escritor entiende las dos generaciones de argumentos
   de tamaño aplicado (texturas) de openskp.
 - **Asistente IA: una respuesta cortada por el límite de tokens ya no
@@ -2287,18 +3228,18 @@ y Sígueme a la de SketchUp.
 ## [0.3.8] — 2026-08-31
 
 **La release del sol.** Un solo día de trabajo mano a mano: cada pieza se
-probó en vivo contra SketchUp antes de darse por buena.
+probó en vivo antes de darse por buena.
 
 ### Añadido
 - **Sombras con el sol de verdad.** No una luz de adorno: la posición solar
   se calcula con las ecuaciones de la NOAA para la geolocalización del
   modelo (o Arequipa si no tiene), por fecha y hora — un **estudio de
-  asoleamiento**, el entregable que SketchUp cobra. Panel de Sombras al
-  estilo SketchUp: fecha con slider del año por meses, hora acotada de
+  asoleamiento**, el entregable que otros cobran. Panel de Sombras:
+  fecha con slider del año por meses, hora acotada de
   amanecer a atardecer (imposible dejar el sol bajo el horizonte sin darse
   cuenta), oscuridad, zona horaria automática por longitud, y «Añadir
-  localización…» sobre el mapa. Las reglas finas también son las de
-  SketchUp: **el vidrio (opacidad <70 %) no proyecta**, los personajes 2D
+  localización…» sobre el mapa. Las reglas finas también son las
+  habituales: **el vidrio (opacidad <70 %) no proyecta**, los personajes 2D
   proyectan su silueta orientada al sol (quieta al orbitar), la malla y las
   hojas proyectan su trama, y el sombreado de caras sigue al sol. Orbitar y
   hacer zoom reutilizan el mapa de sombras: el costo se paga al editar, no
@@ -2312,12 +3253,12 @@ probó en vivo contra SketchUp antes de darse por buena.
 - **Imágenes de referencia** (`Archivo ▸ Importar ▸ Imagen`): un plano
   escaneado o una foto como fondo para calcar — da plano de trabajo y snap,
   viaja dentro del `.igz`, y se puede bloquear para que no estorbe.
-- **Escalar como SketchUp**: el cajón amarillo con agarraderas por esquina
+- **Escalar**: el cajón amarillo con agarraderas por esquina
   (uniforme), arista (2 ejes) y cara (1 eje), Ctrl desde el centro, Shift
   uniforme, factor negativo para espejar, y el VCB acepta factor, `a;b` por
   eje o medida absoluta con unidad.
 - **Ocultar/mostrar aristas** (Edición y clic derecho), con **Mayús+goma**
-  para ocultar de pasada, como en SketchUp.
+  para ocultar de pasada.
 - **Editor de estilos**: panel con los estilos integrados y una biblioteca
   personal («Guardar estilo…»), colores de cielo y suelo con **degradado
   atmosférico**, y los estilos guardados disponibles por marco en las
@@ -2439,7 +3380,7 @@ report through a modelling session took five more defects with it.
 
 ### Fixed
 - **Imported `.skp` models came in shattered into triangles and spikes.**
-  OpenSKP normalized what a coedge's flag carries — SketchUp's raw storage
+  OpenSKP normalized what a coedge's flag carries — the file's raw storage
   bit (0 forward, 1 reversed) became the documented +1 / −1 — and reading it
   as a boolean then took the same endpoint for every coedge, so any polygon
   holding a reversed one came out as a self-intersecting star. Measured on
@@ -2512,7 +3453,7 @@ report through a modelling session took five more defects with it.
 ## [0.3.6] — 2026-08-27
 
 **The nested-placement release**: an imported component keeps the sharing
-SketchUp gave it inside itself, which is what makes the files we write
+the file gave it inside itself, which is what makes the files we write
 small again — and, hunting that through a real modelling session, three
 long-standing freezes fell with it.
 
@@ -2523,7 +3464,7 @@ long-standing freezes fell with it.
   flattened, so a hedge stored as 9600 faces placed 48 times stays that
   way instead of becoming 230400 real ones.
 - **Eyedropper parity (Paint ▸ Alt)**: sampling a face now carries its
-  material to the next click the way SketchUp does — image, applied
+  material to the next click — image, applied
   size, rotation, translucency and the material identity. A face with an
   explicit world→UV map hands it on only within its own plane, where it
   keeps the pattern lined up; a face on another plane takes the material
@@ -2533,7 +3474,7 @@ long-standing freezes fell with it.
 
 ### Fixed
 - **`.skp` files were five times too big.** Saving Marco's pool wrote
-  80 MB against SketchUp's 14. Not textures (6.7 MB embedded there
+  80 MB against the original's 14. Not textures (6.7 MB embedded there
   against 7.1 here) — geometry duplicated by losing a component's
   internal sharing. Now **72.4 MB → 28.7 MB**, with stored faces down
   from 1 294 258 to 75 599 and the world geometry identical (same
@@ -2564,12 +3505,12 @@ long-standing freezes fell with it.
 
 ## [0.3.5] — 2026-08-25
 
-**Sections, the SketchUp parity batch, AI modelling, and the performance
+**Sections, the tool parity batch, AI modelling, and the performance
 marathon** — a full real-world modelling session (a 280k-face pool
 project) hunted down every freeze it hit.
 
 ### Added
-- **Section planes** (SketchUp's Sections, complete): place the active
+- **Section planes** (complete): place the active
   cut with hover plane inference (arrow keys / Shift to lock), one
   active cut per context, GPU-clipped model with **thick cut edges**,
   **section fill**, corner symbol balloons and the Sections toolbar.
@@ -2578,12 +3519,12 @@ project) hunted down every freeze it hit.
   scenes + `.igz` remember the active cut. The composer's hidden-line
   pass clips too and draws the cut chords — real plans and sections on
   sheets.
-- **SketchUp tool parity batch**: **Flip** (2023-style axis planes,
+- **Tool parity batch**: **Flip** (2023-style axis planes,
   Ctrl = flip a copy, classic context-menu entries), **Make Component**
   (G, shared definitions + Make Unique), **Freehand** (sampled,
   RDP-simplified, selects as one contour), **Pie** arc (closes the
   wedge with a face) and chord bulge / radius suffixes in the
-  Measurements box. "Offset" is now **Equidistancia** (SketchUp's
+  Measurements box. "Offset" is now **Equidistancia** (the usual
   Spanish name).
 - **AI Assistant** (Extensions menu): chat with an AI provider from
   inside IngeTrazo — provider picker with per-provider API key and
@@ -2593,10 +3534,10 @@ project) hunted down every freeze it hit.
 - **Native glTF/GLB import** (PBR materials mapped to the paint
   system).
 - **Starter components and textures**: CC0/CC-BY sedan, oak, bush and
-  a scale figure standing at SketchUp's real offset; texture library
+  a scale figure standing at its real offset; texture library
   additions (bark, rock, river pebbles, lawn, concrete pavers, water);
   glass paints translucent end-to-end (library → paint → face).
-- Drawing axes recalibrated against SketchUp (fine-dot negative
+- Drawing axes recalibrated (fine-dot negative
   directions, denser dots); imported files show their name in the
   window title; the plugin path is documented for outside developers.
 
@@ -2617,11 +3558,11 @@ erase cascade indexed (30 s curved-surface deletes → instant) ·
 pinned to the camera pose and revalidated by projection after an orbit
 (no ~25 ms re-pick per notch) · ray picks bucket only hit triangles ·
 **Move, Rotate AND Paste preview through frozen scratch VBOs** (one
-upload, every drag/hover frame is a translated MVP — SketchUp-grade
+upload, every drag/hover frame is a translated MVP — smooth
 dragging of a 230k-face group) · Merge Groups fuses group-to-group
 without the loose-mesh detour · one Newell per face on edit frames ·
 group copies go through the bulk-weld pass · **pasting a huge classic
-group stamps an O(1) sibling of the clipboard prototype** (SketchUp
+group stamps an O(1) sibling of the clipboard prototype** (component
 semantics: copies share the definition until edited) — stamping the
 230k-face group went from ~12 s to instant, rotating a pasted copy
 from seconds to 0.1 s.
@@ -2629,17 +3570,16 @@ from seconds to 0.1 s.
 ## [0.3.4] — 2026-08-25
 
 **The dogfooding release: a real modelling session's bug hunt, plus
-SketchUp-parity work.** Everything here came from drawing an actual
-model and comparing, tool by tool, against SketchUp's official
-documentation.
+tool-parity work.** Everything here came from drawing an actual
+model and comparing, tool by tool, against the expected behaviour.
 
 ### Added
-- **Display styles** (Camera → Style), SketchUp's Styles scoped to what
+- **Display styles** (Camera → Style), scoped to what
   serves printing: Default, Architectural (textures on white), Shaded
   (materials as their texture's average colour), Hidden line (the plan
   style), Monochrome, Wireframe and X-ray — plus Edges/Profiles toggles.
   Scenes remember their style; `.igz` persists it.
-- **Composer frames pick any style** (LayOut-style viewports): each
+- **Composer frames pick any style** (per-frame viewports): each
   sheet frame can render in any of the styles above, the model's active
   style, or the exact vector hidden-line pass.
 - **Copy/paste for groups and components** (Ctrl+C/X/V, context menu):
@@ -2647,8 +3587,8 @@ documentation.
   textures, layers, BIM tags) travel; positioned textures re-anchor to
   the paste point. Paste previews the SOLID model — colours and
   textures riding under the cursor — and stamps once, returning to
-  Select (SketchUp).
-- **Protractor rebuilt to SketchUp parity** (official docs): plane
+  Select.
+- **Protractor rebuilt**: plane
   inference by hover with axis-coloured disc, arrow-key plane locks,
   Shift freeze, fixed-size disc with 15° ticks, tick snapping near the
   disc / 0.1° free farther out, slope input as rise:run (`3:12`), and
@@ -2686,10 +3626,10 @@ documentation.
 
 ## [0.3.3] — 2026-08-21
 
-**The complete SketchUp round trip.** IngeTrazo now writes native `.skp`
-(File → Export → SketchUp) and opens Marco's entire 13-year real-project
+**The complete `.skp` round trip.** IngeTrazo now writes native `.skp`
+(File → Export → `.skp`) and opens Marco's entire 13-year real-project
 corpus — 186 of 186 files, 2013–2026 — natively. Annotations travel BOTH
-ways: dimensions and leader texts drawn in IngeTrazo appear in SketchUp,
+ways: dimensions and leader texts drawn in IngeTrazo appear in the `.skp`,
 and the ones in `.skp` files land in IngeTrazo as live, editable
 annotations. The underlying reader fixes are merged into upstream
 [OpenSKP](https://github.com/iamahsanmehmood/openskp) (PRs #194/#199);
@@ -2702,7 +3642,7 @@ the annotation writer is proposed as PR #203.
   and now **dimensions and leader texts**.
 - **`.skp` annotation import**: linear dimensions (all eras) and leader
   texts with their real label position and leader line; text records
-  decoded byte-exact against SDK-generated ground truth ("Rosetta"
+  decoded byte-exact against reference files with known values ("Rosetta"
   files) and human-drawn corpus records.
 - **Material registry** — materials have NAMES that survive editing:
   painting keeps identity, right-click a named swatch to edit-and-restamp
@@ -2710,7 +3650,7 @@ the annotation writer is proposed as PR #203.
   glTF/SKP exports carry the real names (`Concreto_visto`, not `mat0`).
 - **Leader-text lifecycle**: select by clicking the text itself (glyphs
   outrank geometry), move with the anchor pinned (leader stretches, live
-  preview), edit on double-click (SketchUp's gesture), delete with
+  preview), edit on double-click, delete with
   Supr/context menu, box-select — every step one undoable command.
 - **Solid Inspector** (bundled plugin): explains WHY a solid is not
   watertight.
@@ -2729,7 +3669,7 @@ the annotation writer is proposed as PR #203.
   menu's Delete ignored leader texts entirely.
 - `.skp` export kept same-recipe named materials separate (a repaint in a
   different name no longer merges them), and unpainted faces keep
-  SketchUp's default material instead of turning white.
+  the format's default material instead of turning white.
 - Python Console: a failing script no longer drags an internal
   SyntaxError into the error report.
 
@@ -2777,7 +3717,7 @@ unchanged.
   adapted from IngeCAD's) and the `release-linux` workflow.
 - `main.py --check`: self-diagnosis that reports whether the install can
   find its shaders, translations, textures, components and icons, plus
-  whether the optional Wine/skp2dae converter is present. CI gates the
+  whether the optional external converter is present. CI gates the
   bundle, the AppImage and the extracted tarball on it.
 - `core/paths.py` (`app_root()`): the six runtime resource lookups that
   derived paths from `__file__` now go through it, so a frozen build fails
@@ -2788,7 +3728,7 @@ unchanged.
 - Composer: big models no longer freeze the sheet tools.
 - Repository references updated from `tuxiasumari/ingetrazo` to
   `ingelibre/ingetrazo` (About dialog, tile-fetcher user agents, and the
-  skp2dae download URL, which only worked through GitHub's rename
+  external converter's download URL, which only worked through GitHub's rename
   redirect).
 
 ## [0.3.0] — 2026-08-08
@@ -2808,7 +3748,7 @@ The sheet-composer release: model to printed plan without leaving IngeTrazo.
   - **Sheet dimensions anchored to the model**: snap both points to frame
     geometry (green dot) and the cota remembers the 3D points — edit the
     model, move or rescale the frame, and the dimension follows with its
-    label re-measured (the exact 3D distance). LayOut-style placement:
+    label re-measured (the exact 3D distance). Placement:
     two clicks for the points, a third pulls the line away with extension
     lines; separation stays draggable afterwards.
   - Dimension styles: text height, decimals, oblique ticks / arrows /
@@ -2856,9 +3796,9 @@ the GitHub release notes for the details.
 
 ## [0.2.3] — 2026-07-22
 
-Native pure-Python `.skp` import for ALL SketchUp eras (our OpenSKP fork:
+Native pure-Python `.skp` import for ALL `.skp` eras (our OpenSKP fork:
 VFF walker + legacy MFC parser), validated for exact parity on real
-models; skp2dae becomes an emergency fallback only. See the GitHub
+models; the external converter becomes an emergency fallback only. See the GitHub
 release notes for the details.
 
 ## [0.2.2] — 2026-07-20
@@ -2872,7 +3812,7 @@ branded file-type icons.
   rectangle and frames that region. Icons: a magnifier, and a magnifier
   inside a rectangle.
 - **Branded document icons** for the file types IngeTrazo works with —
-  `.igz` (native), `.dae` (COLLADA) and `.skp` (SketchUp). On Linux a
+  `.igz` (native), `.dae` (COLLADA) and `.skp`. On Linux a
   freedesktop MIME package paints the icons in the file manager (installed
   by `scripts/install_desktop.sh`); on Windows the installer associates the
   `.igz` icon and adds IngeTrazo to the "Open with" list for `.dae`/`.skp`.
@@ -2895,19 +3835,16 @@ branded file-type icons.
 
 ## [0.2.1] — 2026-07-16
 
-Open SketchUp files directly: File ▸ Import ▸ SketchUp (.skp)…
+Open `.skp` files directly: File ▸ Import ▸ `.skp`…
 
 ### Added
-- **Direct `.skp` import** through the external `skp2dae` converter — run as
-  a separate process (the proprietary Trimble DLL never enters the GPL
-  tree). The `.dae` and its texture folder land next to the `.skp`, then the
+- **Direct `.skp` import** through an optional external converter — run as
+  a separate process, never part of IngeTrazo. The `.dae` and its texture folder land next to the `.skp`, then the
   existing COLLADA importer takes over (groups, components, textures,
   face-me sprites). On Linux the converter runs via Wine.
-- **One-click converter install**: if `skp2dae` is missing, the import
-  dialog offers to install it automatically — the converter executable is
-  downloaded from the IngeTrazo release and the SketchUp runtime DLLs from
-  the Blender "SketchUp Importer" add-on's public release, into
-  `~/.local/share/skp2dae/`. No terminal required.
+- **One-click converter install**: if the external converter is missing,
+  the import dialog offers to download it separately. No terminal required.
+  It is not bundled with IngeTrazo.
 
 ### Fixed
 - `.skp` files stored under accented paths (`Imágenes`, `ñ`…) failed with a
@@ -2918,8 +3855,8 @@ Open SketchUp files directly: File ▸ Import ▸ SketchUp (.skp)…
 ## [0.2.0] — 2026-07-15
 
 The BIM release: the IFC bridge to IngePresupuestos is validated end to end,
-SketchUp models migrate with textures and components, the terrain workflow
-takes real field data — and the UI grew into its SketchUp skin.
+`.skp` models migrate with textures and components, the terrain workflow
+takes real field data — and the UI grew into its own skin.
 
 ### BIM → IFC (the thesis, closed)
 - **Per-class base quantities** (`Qto_*BaseQuantities`): walls report net
@@ -2939,18 +3876,18 @@ takes real field data — and the UI grew into its SketchUp skin.
 - The BIM panel now shows the **budget measure per object** (10.40 m²,
   0.31 m³, 1 und) instead of the misleading shell area.
 
-### Bring your SketchUp models
+### Bring your models
 - **COLLADA (.dae) import with real textures**: per-face UV maps from the
   file's TEXCOORDs, texture-tolerant coplanar fusion (no dirty
   triangulations), representative colours when the image folder is missing.
-- **SketchUp's group structure survives**: one Group per assembly (a plaza
+- **The original group structure survives**: one Group per assembly (a plaza
   imports as 291 groups, not one blob) — click selects the lamppost, not
   the world; edit by entering the small group.
 - **Components import as shared instances**: one prototype mesh, N
   transforms (16 instances/6 prototypes saved 59k faces on a real nursery
   project; import went 24.7 → 10.8 s).
-- **Face-me sprites recovered**: the cutout people/trees SketchUp exports
-  without the flag turn toward the camera again, with SketchUp-style
+- **Face-me sprites recovered**: the cutout people/trees exported
+  without the flag turn toward the camera again, with proper
   selection outlines and snap anchors (feet, head).
 - **Big-model interaction**: vectorised pick index (2138 → 22 ms), per-group
   render/pick chunks, one-draw-call faces — a 394k-triangle plaza orbits
@@ -2967,7 +3904,7 @@ takes real field data — and the UI grew into its SketchUp skin.
 
 ### New tools
 - **Text (X)**: leader-text annotations — the prompt prefills with the
-  clicked edge's length, face's area, or point coordinates (SketchUp-style);
+  clicked edge's length, face's area, or point coordinates;
   occluded leaders, selectable, saved in `.igz`.
 - **3D Text**: real extruded geometry from any system font — one watertight
   solid per letter (counters preserved), smooth thickness, glued to the
@@ -2978,8 +3915,8 @@ takes real field data — and the UI grew into its SketchUp skin.
 - **Component placement with the cursor**: inserts follow the mouse and
   settle on the ground plane (or any face you point at); Esc discards.
 
-### UI, SketchUp-shaped
-- Menu bar reorganized to mirror SketchUp: **Archivo · Edición · Cámara ·
+### UI
+- Menu bar reorganized: **Archivo · Edición · Cámara ·
   Dibujo · Herramientas · Ventana · Ayuda** (Draw groups Arcs/Shapes,
   Camera owns views/projection/orbit, Window owns panels + language).
 - **Components tray panel** with static image thumbnails (no 3D rendering
@@ -3000,11 +3937,11 @@ takes real field data — and the UI grew into its SketchUp skin.
 
 ## [0.1.0] — 2026-07-11
 
-The first release. A usable, free, Linux-first SketchUp-style 3D modeler for
+The first release. A usable, free, Linux-first 3D modeler for
 civil engineering and architecture — draw → model → tag → take off → export.
 
 ### Modeling engine
-- Shared-vertex non-manifold topology engine (SketchUp's model): sticky
+- Shared-vertex non-manifold topology engine: sticky
   geometry, automatic welding, face detection, planar-arrangement rebuilds.
 - Push/Pull with the full solid pipeline: recess, steps, through-holes,
   clamps, distance inference, Ctrl = copy, double-click repeats — and the
@@ -3057,12 +3994,12 @@ civil engineering and architecture — draw → model → tag → take off → e
 
 ### Interchange
 - Native `.igz` documents (JSON, versioned).
-- Import: COLLADA `.dae` (SketchUp exports, components, Y-up/inches
+- Import: COLLADA `.dae` (components, Y-up/inches
   conversion), OBJ (+MTL colours), KML/GeoJSON.
 - Export: IFC4, STL (3D printing), OBJ (+MTL, textures with UVs).
 
 ### Experience
-- Bilingual UI (English source, full Spanish), SketchUp-style movable
+- Bilingual UI (English source, full Spanish), movable
   icon toolbars, QGIS-style panels (Properties | BIM | Georef tabs),
   sky/ground horizon, paper-white maquette shading with face culling,
   infinite dashed axes.

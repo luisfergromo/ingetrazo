@@ -7,12 +7,15 @@ Save, Save As) onto :mod:`formats.igz`.
 """
 from __future__ import annotations
 
+from views import prompts as _prompts
+
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSettings, QEvent, QCoreApplication, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QVector3D
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -23,7 +26,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.i18n import available_languages, current_language, set_language, tr
+from core.i18n import (LANGUAGE_NAMES, available_languages, current_language,
+                       set_language, tr)
+from views.theme import style as theme_style
 from core.units import fmt_pair
 from views.filedialogs import file_dialogs
 from core.version import __version__
@@ -43,7 +48,6 @@ from formats import obj as obj_format
 from formats import ifc as ifc_format
 from formats import stl as stl_format
 from formats import gltf as gltf_format
-from formats import skp_out as skp_out_format
 from tools.arc import CenterArcTool, ArcTool, ThreePointArcTool
 from tools.circle import CircleTool, PolygonTool
 from tools.dimension import DimensionTool
@@ -61,7 +65,8 @@ from tools.followme import FollowMeTool
 from tools.rotated_rectangle import RotatedRectangleTool
 from tools.offset import OffsetTool
 from tools.texture_position import TexturePositionTool
-from tools.walkthrough import LookAroundTool, PositionCameraTool, WalkTool
+from tools.walkthrough import (FirstPersonTool, LookAroundTool,
+                               PositionCameraTool, WalkTool)
 from tools.paint import PaintTool
 from tools.paste import PasteTool
 from tools.arc import PieTool
@@ -78,6 +83,71 @@ from views.viewport import Viewport
 
 IGZ_FILE_FILTER = "IngeTrazo document (*.igz);;All files (*)"
 
+# What each command does, for the status bar, the button tooltips and F3
+# (Blender's descriptions): a sentence, in English — ``tr`` translates it
+# where it is set — never repeating the command's name or its keys.
+_VIEW_TIPS = {
+    "top": "Look straight down on the model, in plan.",
+    "bottom": "Look straight up at the model from below.",
+    "front": "Look at the model from the front.",
+    "back": "Look at the model from the back.",
+    "left": "Look at the model from the left.",
+    "right": "Look at the model from the right.",
+    "iso": "Look at the model from a corner above, at the same angle to "
+           "the three axes.",
+}
+_STYLE_TIPS = {
+    "Default": "Faces with their materials and textures, under the sky.",
+    "Architectural": "Faces with their materials on a plain white "
+                     "background, without the sky.",
+    "Shaded": "Faces in their colours, without textures.",
+    "Hidden line": "White faces that hide what lies behind them — a clean "
+                   "line drawing.",
+    "Monochrome": "Every face in the front or back colour, without "
+                  "materials.",
+    "Wireframe": "Only the edges: the faces are not drawn.",
+    "X-ray": "See-through faces, so the edges behind them show.",
+}
+_SAVE_TIP = ("Save the document — the model and every sheet — to its .igz "
+             "file.")
+_TEXT3D_TIP = ("Build a text as an extruded solid, in the font and height "
+               "you choose.")
+
+def _repeatable(label: str):
+    """Mark a one-shot command as the one Repeat (Shift+R) replays.
+
+    Blender's Shift+R: after Reverse Faces on one face, select the next and
+    repeat. Recorded on the SLOT, not on a
+    QAction, because the right-click menu builds its actions afresh each
+    time — a remembered context-menu QAction would be a dead object by the
+    next repeat. Arguments the command takes (Intersect's mode) are kept;
+    the ``checked`` flag Qt may append to a menu's ``triggered`` is not."""
+    import functools
+    import inspect
+
+    def deco(fn):
+        takes = len(inspect.signature(fn).parameters) - 1    # minus self
+
+        @functools.wraps(fn)
+        def wrapper(self, *args):
+            args = args[:takes]
+            self._remember_command(label, lambda: fn(self, *args))
+            return fn(self, *args)
+        return wrapper
+    return deco
+
+
+def _obj_parts(temp):
+    """The container a multi-part OBJ imported as, its pieces' facet seams
+    softened like any library model's, or ``None`` for a single-piece file
+    (which the callers keep handling as one mesh)."""
+    if not temp.groups or not temp.groups[0].children:
+        return None
+    from formats.fuse import soften_smooth_edges
+    group = temp.groups[0]
+    for kid in group.children:
+        soften_smooth_edges(kid.mesh, cos_threshold=0.55)
+    return group
 
 class MainWindow(QMainWindow):
     """Top-level IngeTrazo window."""
@@ -107,7 +177,7 @@ class MainWindow(QMainWindow):
             "followme": FollowMeTool(),
             "fillet": FilletTool(),
             # Entered from a textured face's right-click menu, never from
-            # the toolbar (SketchUp's Texture ▸ Position).
+            # the toolbar (Texture ▸ Position).
             "texture_position": TexturePositionTool(),
             "paint": PaintTool(),
             "dimension": DimensionTool(),
@@ -117,16 +187,27 @@ class MainWindow(QMainWindow):
             "text": TextTool(),
             # Georef trace (Track G) — draws a GeoPath, never mesh geometry.
             "geopath": GeoPathTool(),
-            # SketchUp's Tools ▸ Section Plane (core/section.py).
+            # Tools ▸ Section Plane (core/section.py).
             "section": SectionPlaneTool(),
-            # SketchUp's Camera ▸ Position Camera / Walk / Look Around
+            # Camera ▸ Position Camera / Walk / Look Around
             # (tools/walkthrough.py) — Rafael's «pasitos» for interiors.
             "position_camera": PositionCameraTool(),
             "walk": WalkTool(),
             "look_around": LookAroundTool(),
+            # Walking as a game plays it (W/A/S/D + mouse look), beside
+            # the classic Walk rather than instead of it.
+            "first_person": FirstPersonTool(),
         }
+        # The Solid Tools (tools/solid_tools.py, core/solids.py).
+        from tools.solid_tools import SOLID_TOOLS
+        for key, cls in SOLID_TOOLS:
+            self._tools[key] = cls()
+        # Right-click ▸ Change Axes (issue #44) — no toolbar button, the
+        # usual convention.
+        from tools.change_axes import ChangeAxesTool
+        self._tools["change_axes"] = ChangeAxesTool()
         # Tag each tool with its icon key so the viewport can turn the mouse
-        # pointer into the tool's icon (SketchUp-style cursors).
+        # pointer into the tool's icon (tool-shaped cursors).
         for key, tool in self._tools.items():
             if not getattr(tool, "icon", None):
                 tool.icon = key
@@ -134,13 +215,28 @@ class MainWindow(QMainWindow):
 
         self._current_path: Optional[Path] = None
         # Name of an IMPORTED file (.skp/.dae) shown in the title until the
-        # model is saved as .igz — opening a SketchUp file natively should
+        # model is saved as .igz — opening a .skp file natively should
         # read as opening THAT file (user request).
         self._import_name: Optional[str] = None
+        #: An extension's workspace shown instead of the model, and the model
+        #: parked meanwhile; see :meth:`enter_workspace`.
+        self._workspace = None
+        self._parked: Optional[dict] = None
+        #: Tool keys a workspace allows (None = every tool).
+        self._tool_filter: Optional[set] = None
+        #: Suffix (".xyz") → callable(path) -> bool: documents an extension
+        #: opens itself (``ExtensionApp.add_file_opener``), from Open Recent,
+        #: the command line or a double-click.
+        self.file_openers: dict = {}
         self._saved_version: int = 0
 
         self._setup_ui()
+        # The user's own keyboard shortcuts over the factory ones (#138).
+        from views import shortcuts as _shortcuts
+        _shortcuts.remember_defaults(self)
+        _shortcuts.apply_user_shortcuts(self)
         self._activate_tool("select")
+        self._apply_new_document_units()
         self._insert_scale_figure()
         self._update_title()
 
@@ -155,10 +251,12 @@ class MainWindow(QMainWindow):
         self.viewport.glReady.connect(self._on_gl_ready)
         self.setCentralWidget(self.viewport)
 
+        self._extension_docks: list = []   # side panels added by plugins
         self._build_toolbar()
         self._build_tray()
         self._build_menubar()
         self._build_statusbar()
+        self._describe_buttons()
 
         self._saved_version = self.viewport.scene.version
         self.viewport.sceneVersionChanged.connect(self._on_scene_version_changed)
@@ -176,6 +274,7 @@ class MainWindow(QMainWindow):
                 state = factory.read_bytes()
         if state:
             self.restoreState(state)
+        self._show_default_trays(st)
         self._place_new_toolbars(st)
         # Packed on the first show (see showEvent): the toolbars have no
         # geometry to read their order from until the window is laid out.
@@ -200,6 +299,59 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QTimer
             self._toolbars_packed = True
             QTimer.singleShot(0, self._pack_toolbars)
+        if not getattr(self, "_ndof_connected", False):
+            self._connect_ndof()
+
+    # ---- 3D mouse (issue #108) ----------------------------------------------
+    def _route_window_toggle(self, name: str, own):
+        """A slot for a Window-menu toggle (clean screen, sidebar) that acts
+        on the window being worked in. On macOS the menu bar is global: its
+        Cmd+0 answered for the MODEL window even with the sheet composer in
+        front — «al pulsarlo me lleva a la ventana del Modelador y le oculta
+        todo» (#114). When the composer is the active window, the press goes
+        to its own action and this one keeps its state."""
+        def slot(on: bool) -> None:
+            from PySide6.QtWidgets import QApplication
+            comp = getattr(self, "_composer", None)
+            if comp is not None and QApplication.activeWindow() is comp:
+                mine = getattr(self, name)
+                mine.blockSignals(True)
+                mine.setChecked(not on)
+                mine.blockSignals(False)
+                getattr(comp, name).toggle()
+                return
+            own(on)
+        return slot
+
+    def _connect_ndof(self) -> None:
+        """Listen to the 3D mouse, if the machine has one (spacenavd on
+        Linux, Raw Input on Windows). Silent when there is none."""
+        self._ndof_connected = True
+        try:
+            from views.ndof_input import shared_input
+            dev = shared_input()
+            dev.motion.connect(self._on_ndof_motion)
+            dev.button.connect(self._on_ndof_button)
+        except Exception as exc:  # noqa: BLE001 — never block the window
+            import sys as _sys
+            print(f"IngeTrazo: 3D mouse unavailable ({exc!r})",
+                  file=_sys.stderr)
+
+    def _on_ndof_motion(self, sample, dt: float) -> None:
+        # Only the window being worked in moves (New Window makes several).
+        if not self.isActiveWindow():
+            return
+        from core.ndof import apply_ndof
+        from views.ndof_input import current_settings
+        vp = self.viewport
+        if apply_ndof(vp.camera, sample, dt, vp.height(), current_settings()):
+            vp.update()
+
+    def _on_ndof_button(self, number: int, down: bool) -> None:
+        # The two buttons every model has: both fit the model, the usual
+        # default for the right one and the most useful single command.
+        if down and number in (0, 1) and self.isActiveWindow():
+            self._on_zoom_extents()
 
     def _pack_toolbars(self) -> None:
         """Re-seat every docked toolbar so each takes exactly the length of
@@ -278,11 +430,24 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QApplication
         # Housekeeping that rides the same slow tick: a clean collection
         # now and then — never mid-gesture (over a big model it is ~0.3 s).
-        if getattr(self.viewport, "_last_pos", None) is None:
+        import sys
+        if sys.getallocatedblocks() > 40_000_000:
+            self._gc_too_slow = True       # tens of millions of objects: ~5 s
+        if getattr(self.viewport, "_last_pos", None) is None \
+                and not getattr(self, "_gc_too_slow", False):
             import gc
+            import time
+            t0 = time.perf_counter()
             gc.collect()
+            # On a model of 14 million faces a full collection froze the
+            # app for 4.5 s every five minutes (live profile, #158): once
+            # one takes that long, the housekeeping stops for the session.
+            if time.perf_counter() - t0 > 0.5:
+                self._gc_too_slow = True
         if not self._is_dirty():
             return
+        if self._workspace is not None:
+            return                      # the model is parked; the workspace saves its own
         version = self.viewport.scene.version
         if version == getattr(self, "_autosaved_version", None):
             return
@@ -338,7 +503,7 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.bim_tray, self.georef_tray)
         # The trays are tabbed: the tab bar already names the active panel,
         # so each dock's own title bar would say the same thing right above
-        # it. An empty title-bar widget removes the duplicate (SketchUp-tray
+        # it. An empty title-bar widget removes the duplicate (a clean tray
         # look); panels are toggled from the View menu, not dragged around.
         for dock in (self.tray, self.bim_tray, self.georef_tray):
             dock.setTitleBarWidget(QWidget(dock))
@@ -362,13 +527,19 @@ class MainWindow(QMainWindow):
         self.shadows_panel = ShadowsPanel(self)
         self.dimstyle_panel = DimensionStylePanel(self)
         panels_tb = self._new_toolbar(tr("Panels"), "panels_toolbar")
-        for panel, key, title in (
-                (self.styles_panel, "styles", tr("Styles")),
-                (self.shadows_panel, "shadows", tr("Shadows")),
-                (self.dimstyle_panel, "dimension_style", tr("Dimension style"))):
+        for panel, key, title, tip in (
+                (self.styles_panel, "styles", tr("Styles"),
+                 tr("How the model looks: faces, edges, background and "
+                    "sky.")),
+                (self.shadows_panel, "shadows", tr("Shadows"),
+                 tr("The sun's shadows: on or off, the date, the time and "
+                    "how dark they are.")),
+                (self.dimstyle_panel, "dimension_style", tr("Dimension style"),
+                 tr("How dimensions look: text, arrows, units and "
+                    "precision."))):
             btn = QToolButton(panels_tb)
             btn.setIcon(tool_icon(key))
-            btn.setToolTip(title)
+            btn.setToolTip(f"{title}\n{tip}")
             btn.setPopupMode(QToolButton.InstantPopup)
             btn.setStyleSheet(
                 "QToolButton::menu-indicator { image: none; }")
@@ -393,7 +564,7 @@ class MainWindow(QMainWindow):
 
     def _new_toolbar(self, title: str, object_name: str) -> QToolBar:
         """A separate, independently draggable/floatable icons-only toolbar
-        (SketchUp-style — Draw, Modify, View… each move on their own)."""
+        (Draw, Modify, View… each move on their own)."""
         from PySide6.QtCore import QSize
         tb = QToolBar(title, self)
         tb.setObjectName(object_name)
@@ -404,6 +575,7 @@ class MainWindow(QMainWindow):
         px = toolbar_icon_px()
         tb.setIconSize(QSize(px, px))
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.toggleViewAction().setStatusTip(tr("Show or hide this toolbar."))
         self.addToolBar(Qt.TopToolBarArea, tb)
         from views.icons import style_overflow_button
         style_overflow_button(tb)
@@ -435,9 +607,10 @@ class MainWindow(QMainWindow):
             if alt:
                 seqs.append(QKeySequence(alt))
             action.setShortcuts(seqs)
-            action.setToolTip(f"{name}  ({tool.shortcut})")
-        else:
-            action.setToolTip(name)
+        if tool.description:
+            action.setStatusTip(tr(tool.description))
+        from views.shortcuts import set_tooltip
+        set_tooltip(action, name)
         action.triggered.connect(lambda _c, k=key: self._activate_tool(k))
         self._tool_group.addAction(action)
         tb.addAction(action)
@@ -453,7 +626,7 @@ class MainWindow(QMainWindow):
         # the palette flips (dark ↔ light) at runtime — see changeEvent below.
         self._icon_actions: list[tuple[QAction, str]] = []
 
-        # One toolbar per task, each independently movable (SketchUp).
+        # One toolbar per task, each independently movable.
         layout = [
             ("main", tr("Main"), ["select", "eraser", "paint"]),
             ("draw", tr("Draw"),
@@ -463,9 +636,13 @@ class MainWindow(QMainWindow):
             ("modify", tr("Modify"), ["pushpull", "move", "rotate", "scale", "flip", "followme", "offset", "fillet"]),
             ("annotate", tr("Annotate"), ["tape", "protractor", "dimension", "text", "geopath"]),
             ("sections", tr("Sections"), ["section"]),
-            # SketchUp's Walkthrough toolbar, in its order.
+            # The Solid Tools toolbar, in the usual order.
+            ("solids", tr("Solid Tools"),
+             ["outer_shell", "solid_union", "solid_subtract", "solid_trim",
+              "solid_intersect", "solid_split"]),
+            # The Walkthrough toolbar, in the usual order.
             ("walkthrough", tr("Walkthrough"),
-             ["position_camera", "walk", "look_around"]),
+             ["position_camera", "walk", "look_around", "first_person"]),
         ]
         for oname, title, keys in layout:
             tb = self._new_toolbar(title, oname)
@@ -479,7 +656,8 @@ class MainWindow(QMainWindow):
         # action, so Ctrl+S never becomes ambiguous.
         main_tb = self.toolbars["main"]
         act_save = QAction(tool_icon("save"), tr("Save"), self)
-        act_save.setToolTip(tr("Save the document (Ctrl+S)"))
+        act_save.setToolTip(f"{tr('Save')}  (Ctrl+S)")
+        act_save.setStatusTip(tr(_SAVE_TIP))
         act_save.triggered.connect(self._on_save)
         first = main_tb.actions()[0] if main_tb.actions() else None
         main_tb.insertAction(first, act_save)
@@ -487,7 +665,7 @@ class MainWindow(QMainWindow):
         self._icon_actions.append((act_save, "save"))
         self._act_save_tb = act_save
 
-        # SketchUp keeps a pipette beside the material you paint with: it is
+        # A pipette sits beside the material you paint with: it is
         # how you FIND the eyedropper. Alt+click does the same for people who
         # know the modifier — Marco asked for the button because that is what
         # he reaches for ("hay un icono al costado de pintura").
@@ -501,17 +679,18 @@ class MainWindow(QMainWindow):
         main_tb.addAction(self._act_eyedropper)
         self._icon_actions.append((self._act_eyedropper, "eyedropper"))
 
-        # The Sections toolbar carries SketchUp's three display toggles next
+        # The Sections toolbar carries the three usual display toggles next
         # to the tool: Display Section Planes / Cuts / Fill. Created here
         # (the menubar builds later and reuses the same actions).
         sec_tb = self.toolbars["sections"]
         sec_tb.addSeparator()
 
-        def _sec_toggle(key: str, text: str, slot):
+        def _sec_toggle(key: str, text: str, tip: str, slot):
             act = QAction(tool_icon(key), text, self)
             act.setCheckable(True)
             act.setChecked(True)
             act.setToolTip(text)
+            act.setStatusTip(tip)
             act.toggled.connect(slot)
             self._icon_actions.append((act, key))
             sec_tb.addAction(act)
@@ -519,29 +698,31 @@ class MainWindow(QMainWindow):
 
         self._act_show_splanes = _sec_toggle(
             "section_planes", tr("Section Planes"),
+            tr("Show the section planes themselves; the cut they make "
+               "stays either way."),
             lambda on: self._set_section_visibility("show_section_planes", on))
         self._act_show_scuts = _sec_toggle(
             "section_cuts", tr("Section Cuts"),
+            tr("Cut the model open at its active section planes; off, the "
+               "model shows whole."),
             lambda on: self._set_section_visibility("show_section_cuts", on))
         self._act_section_fill = _sec_toggle(
             "section_fill", tr("Section Fill"),
+            tr("Fill the cut faces of a section with a solid colour."),
             lambda on: self._set_style_field("section_fill", on))
 
         # 3D Text opens a dialog (it's a one-shot action, not a checkable tool),
         # so it gets its own button on the Annotate bar next to the 2D Text tool.
         self._act_3dtext = QAction(tool_icon("text3d"), tr("3D Text"), self)
-        self._act_3dtext.setToolTip(tr("3D Text — build extruded text as a solid"))
+        self._act_3dtext.setStatusTip(tr(_TEXT3D_TIP))
         self._act_3dtext.triggered.connect(self._on_insert_3d_text)
         self.toolbars["annotate"].addAction(self._act_3dtext)
         self._icon_actions.append((self._act_3dtext, "text3d"))
 
-        # Spacebar returns to Select, like SketchUp's pointer ("S" now
-        # belongs to Scale, matching SketchUp).
+        # Spacebar returns to Select, the usual convention ("S" now
+        # belongs to Scale, as users of push/pull modellers expect).
         select_action = self._tool_actions["select"]
         select_action.setShortcuts([QKeySequence(Qt.Key_Space)])
-        select_action.setToolTip(tr(
-            "Select (Space) — Shift+click adds or takes away, Ctrl+click "
-            "adds, Shift+Ctrl+click takes away. Same with the box."))
 
         # View toolbar: camera nav (Orbit / Pan / Zoom / Zoom Window) + Zoom
         # Extents + iso view.
@@ -569,15 +750,28 @@ class MainWindow(QMainWindow):
         # ONE action for Zoom Extents, shared with the Camera menu below.
         # It used to be built twice — same key on two QActions is a Qt
         # ambiguity, and an ambiguous shortcut fires NEITHER, so F2 did
-        # nothing at all. Shift+Z is SketchUp's own key for it; F2 stays as
+        # nothing at all. Shift+Z is the usual key for it; F2 stays as
         # an alternate because it is the one that was documented here.
         act_ze = QAction(tool_icon("zoom_extents"), tr("Zoom Extents"), self)
         self._icon_actions.append((act_ze, "zoom_extents"))
         act_ze.setShortcuts([QKeySequence("Shift+Z"), QKeySequence("F2")])
-        act_ze.setToolTip(f"{tr('Zoom Extents')}  (Shift+Z)")
+        act_ze.setStatusTip(tr("Frame the whole model in the view."))
+        from views.shortcuts import set_tooltip
+        set_tooltip(act_ze, tr("Zoom Extents"))
         act_ze.triggered.connect(self._on_zoom_extents)
         view_tb.addAction(act_ze)
         self._act_zoom_extents = act_ze
+
+        # Zoom Selection: the same framing over the selection alone. With
+        # nothing selected it does nothing (Zoom Extents is one key away).
+        act_zs = QAction(tool_icon("zoom_selection"), tr("Zoom Selection"), self)
+        self._icon_actions.append((act_zs, "zoom_selection"))
+        act_zs.setShortcut(QKeySequence("Ctrl+Alt+Z"))
+        act_zs.setStatusTip(tr("Frame the selection in the view."))
+        set_tooltip(act_zs, tr("Zoom Selection"))
+        act_zs.triggered.connect(self._on_zoom_selection)
+        view_tb.addAction(act_zs)
+        self._act_zoom_selection = act_zs
 
         # Standard-views toolbar: one-shot camera orientations, icon-only.
         views_tb = self._new_toolbar(tr("Standard Views"), "views")
@@ -595,9 +789,21 @@ class MainWindow(QMainWindow):
         ]:
             act = QAction(tool_icon(icon), tr(label), self)
             act.setToolTip(tr(label))
+            act.setStatusTip(tr(_VIEW_TIPS[key]))
             act.triggered.connect(lambda _c, k=key: self._on_standard_view(k))
             views_tb.addAction(act)
             self._icon_actions.append((act, icon))
+
+    def _describe_buttons(self) -> None:
+        """A toolbar button's tooltip says what it does under its name and
+        keys, as Blender's do: the action's status tip, the sentence the
+        status bar shows for its menu entry. Run once the menus — which
+        give some of the toolbar actions their tip — are built."""
+        for tb in self.findChildren(QToolBar):
+            for act in tb.actions():
+                tip = act.statusTip()
+                if tip and tip not in act.toolTip():
+                    act.setToolTip(f"{act.toolTip()}\n{tip}")
 
     def _refresh_toolbar_icons(self) -> None:
         """Re-draw the programmatic toolbar icons for the current palette so a
@@ -629,13 +835,21 @@ class MainWindow(QMainWindow):
 
         # Edit menu
         edit_menu = menubar.addMenu(tr("Edit"))
+        self._act_simplify_mesh = QAction(tr("Simplify Mesh…"), self)
+        self._act_simplify_mesh.setToolTip(tr(
+            "Simplify Mesh — merge coplanar and near-coplanar faces"))
+        self._act_simplify_mesh.triggered.connect(self._on_simplify_mesh)
 
         self._undo_action = QAction(tr("Undo"), self)
+        self._undo_action.setStatusTip(tr(
+            "Take back the last change to the model."))
         self._undo_action.setShortcut(QKeySequence.Undo)
         self._undo_action.triggered.connect(self._on_undo)
         edit_menu.addAction(self._undo_action)
 
         self._redo_action = QAction(tr("Redo"), self)
+        self._redo_action.setStatusTip(tr(
+            "Bring back the change that was just undone."))
         # Cover both classic Windows (Ctrl+Y) and Linux/macOS (Ctrl+Shift+Z).
         self._redo_action.setShortcuts(
             [QKeySequence.Redo, QKeySequence("Ctrl+Shift+Z")]
@@ -643,89 +857,207 @@ class MainWindow(QMainWindow):
         self._redo_action.triggered.connect(self._on_redo)
         edit_menu.addAction(self._redo_action)
 
+        # Blender's Shift+R (R alone is the Rectangle), and the first entry
+        # of the right-click menu. Not Enter, not Space: Space is the usual
+        # Select, and a habit-pressed key that repeats could bring back the
+        # Eraser or run Explode on whatever happens to be selected.
+        self._repeat_action = QAction(tr("Repeat last command"), self)
+        self._repeat_action.setStatusTip(tr(
+            "Run the last command again, on what is selected now."))
+        # Its text names what it would repeat, so the shortcut editor (#138)
+        # needs a key that does not change with it.
+        self._repeat_action.setObjectName("repeat_last_command")
+        self._repeat_action.setShortcut(QKeySequence("Shift+R"))
+        self._repeat_action.setEnabled(False)
+        self._repeat_action.triggered.connect(self.repeat_last_command)
+        edit_menu.addAction(self._repeat_action)
+        # On the Main toolbar right after the pointer, the usual place
+        # (Marco, 23-09). The SAME actions as the Edit menu: a second QAction
+        # with Ctrl+Z would make the shortcut ambiguous, and an ambiguous
+        # shortcut fires neither (the F2 lesson on Zoom Extents).
+        main_tb = getattr(self, "toolbars", {}).get("main")
+        if main_tb is not None:
+            from views.icons import tool_icon
+            for act, key, tip in ((self._undo_action, "undo", tr("Undo")),
+                                  (self._redo_action, "redo", tr("Redo"))):
+                act.setIcon(tool_icon(key))
+                from views.shortcuts import set_tooltip
+                set_tooltip(act, tip)
+                self._icon_actions.append((act, key))
+            after = self._tool_actions.get("select")
+            acts = main_tb.actions()
+            nxt = (acts[acts.index(after) + 1]
+                   if after in acts and acts.index(after) + 1 < len(acts)
+                   else None)
+            for act in (self._undo_action, self._redo_action):
+                if nxt is None:
+                    main_tb.addAction(act)
+                else:
+                    main_tb.insertAction(nxt, act)
+
         edit_menu.addSeparator()
 
         cut_action = QAction(tr("Cut"), self)
+        cut_action.setStatusTip(tr(
+            "Take the selection out of the model and keep it to paste "
+            "elsewhere."))
         cut_action.setShortcut(QKeySequence.Cut)
         cut_action.triggered.connect(lambda: self.viewport.cut_selection())
         edit_menu.addAction(cut_action)
 
         copy_action = QAction(tr("Copy"), self)
+        copy_action.setStatusTip(tr(
+            "Keep a copy of the selection to paste here or in another "
+            "IngeTrazo window."))
         copy_action.setShortcut(QKeySequence.Copy)
         copy_action.triggered.connect(lambda: self.viewport.copy_selection())
         edit_menu.addAction(copy_action)
 
         paste_action = QAction(tr("Paste"), self)
+        paste_action.setStatusTip(tr(
+            "Place what was cut or copied, with a click where it goes."))
         paste_action.setShortcut(QKeySequence.Paste)
         paste_action.triggered.connect(self._on_paste)
         edit_menu.addAction(paste_action)
 
+        paste_in_place_action = QAction(tr("Paste in Place"), self)
+        paste_in_place_action.setStatusTip(tr(
+            "Paste the copy exactly where the original was, in the group "
+            "that is open — to move things into or out of groups without "
+            "shifting them."))
+        paste_in_place_action.setShortcut(QKeySequence("Ctrl+Alt+V"))
+        paste_in_place_action.triggered.connect(self._on_paste_in_place)
+        edit_menu.addAction(paste_in_place_action)
+
         edit_menu.addSeparator()
 
         select_all_action = QAction(tr("Select All"), self)
+        select_all_action.setStatusTip(tr(
+            "Select everything: edges, faces, groups and dimensions."))
         select_all_action.setShortcut(QKeySequence.SelectAll)
         select_all_action.triggered.connect(self._on_select_all)
         edit_menu.addAction(select_all_action)
 
+        # Edit ▸ Invert Selection, the usual shortcut.
+        invert_action = QAction(tr("Invert Selection"), self)
+        invert_action.setStatusTip(tr(
+            "Select what is not selected, and drop what is."))
+        invert_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        invert_action.triggered.connect(self._on_invert_selection)
+        edit_menu.addAction(invert_action)
+
         edit_menu.addSeparator()
 
         group_action = QAction(tr("Make Group"), self)
+        group_action.setStatusTip(tr(
+            "Wrap the selection in a group that moves as one and keeps "
+            "apart from the geometry around it."))
         group_action.setShortcut(QKeySequence("Ctrl+G"))
         group_action.triggered.connect(self._on_make_group)
         edit_menu.addAction(group_action)
 
         component_action = QAction(tr("Make Component…"), self)
-        component_action.setShortcut(QKeySequence("G"))   # SketchUp's G
+        component_action.setStatusTip(tr(
+            "Turn the selection into a component: every copy shares it, "
+            "so changing one changes them all."))
+        component_action.setShortcut(QKeySequence("G"))   # the usual G
         component_action.triggered.connect(self._on_make_component)
         edit_menu.addAction(component_action)
 
         explode_action = QAction(tr("Explode Group"), self)
+        explode_action.setStatusTip(tr(
+            "Break the selected groups apart, back into the geometry "
+            "around them."))
         explode_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
         explode_action.triggered.connect(self._on_explode_group)
         edit_menu.addAction(explode_action)
 
+        # Edit ▸ Intersect Faces (core/intersect.py).
+        self._intersect_menu = QMenu(tr("Intersect Faces"), edit_menu)
+        self._fill_intersect_menu(self._intersect_menu)
+        edit_menu.addMenu(self._intersect_menu)
+
+        split_action = QAction(tr("Split into Pieces"), self)
+        split_action.setStatusTip(tr(
+            "Regroup the selected group by the pieces that do not touch; "
+            "explode it afterwards for each piece on its own."))
+        split_action.triggered.connect(self._on_split_into_pieces)
+        edit_menu.addAction(split_action)
+
+        edit_menu.addAction(self._act_simplify_mesh)
+
         convert_path_action = QAction(tr("Convert Path to Geometry"), self)
+        convert_path_action.setStatusTip(tr(
+            "Turn the selected paths into edges of the model; a closed "
+            "path becomes a face, ready to push up."))
         convert_path_action.triggered.connect(self._on_convert_geopath)
         edit_menu.addAction(convert_path_action)
 
         delete_guides_action = QAction(tr("Delete Guides"), self)
+        delete_guides_action.setStatusTip(tr(
+            "Remove every guide line and guide point from the model."))
         delete_guides_action.triggered.connect(self._on_delete_guides)
         edit_menu.addAction(delete_guides_action)
 
         edit_menu.addSeparator()
 
-        # SketchUp's Edit ▸ Hide and Edit ▸ Unhide ▸ Last / All. Hide takes
+        # Edit ▸ Hide and Edit ▸ Unhide ▸ Last / All. Hide takes
         # the selected OBJECTS (groups, components) and edges; there was
         # only «Ocultar aristas» and Rafael looked for the object one and
         # did not find it (2026-09-16, 38:40).
         hide_action = QAction(tr("Hide"), self)
+        hide_action.setStatusTip(tr(
+            "Stop showing the selected objects, faces and edges; they "
+            "stay in the document until unhidden."))
         hide_action.triggered.connect(self._on_hide)
         edit_menu.addAction(hide_action)
 
         unhide_menu = edit_menu.addMenu(tr("Unhide"))
         unhide_selected_action = QAction(tr("Selected"), self)
+        unhide_selected_action.setStatusTip(tr(
+            "Show again the hidden things that are selected — Hidden "
+            "Objects or Hidden Geometry lets you select them."))
         unhide_selected_action.triggered.connect(self._on_unhide_selected)
         unhide_menu.addAction(unhide_selected_action)
         unhide_last_action = QAction(tr("Last"), self)
+        unhide_last_action.setStatusTip(tr(
+            "Show again what the last hiding put away."))
         unhide_last_action.triggered.connect(self._on_unhide_last)
         unhide_menu.addAction(unhide_last_action)
         unhide_all_action = QAction(tr("All"), self)
+        unhide_all_action.setStatusTip(tr(
+            "Show again everything that is hidden."))
         unhide_all_action.triggered.connect(self._on_unhide_all)
         unhide_menu.addAction(unhide_all_action)
 
         reverse_action = QAction(tr("Reverse Faces"), self)
+        reverse_action.setStatusTip(tr(
+            "Swap the front and back sides of the selected faces."))
         reverse_action.triggered.connect(self._on_reverse_faces)
         edit_menu.addAction(reverse_action)
 
+        orient_action = QAction(tr("Orient Faces"), self)
+        orient_action.setStatusTip(tr(
+            "Turn every face connected to the selected one so its front "
+            "side matches."))
+        orient_action.triggered.connect(self._on_orient_faces)
+        edit_menu.addAction(orient_action)
+
         heal_action = QAction(tr("Heal Overlapping Faces"), self)
+        heal_action.setStatusTip(tr(
+            "Remove the faces left lying over their own subdivisions "
+            "after drawing or erasing."))
         heal_action.triggered.connect(self._on_heal_overlaps)
         edit_menu.addAction(heal_action)
 
         rebuild_action = QAction(tr("Rebuild Faces (Planar)"), self)
+        rebuild_action.setStatusTip(tr(
+            "Work the faces out again from the edges: on the plane of the "
+            "selected faces, or over the whole drawing when it is flat."))
         rebuild_action.triggered.connect(self._on_rebuild_planar)
         edit_menu.addAction(rebuild_action)
 
-        # Camera menu (SketchUp: navigation + projection + canned views)
+        # Camera menu (navigation + projection + canned views)
         camera_menu = menubar.addMenu(tr("Camera"))
 
         standard_menu = camera_menu.addMenu(tr("Standard Views"))
@@ -739,23 +1071,41 @@ class MainWindow(QMainWindow):
             ("Isometric", "iso"),
         ]:
             action = QAction(tr(label), self)
+            action.setStatusTip(tr(_VIEW_TIPS[key]))
             action.triggered.connect(lambda _checked, k=key: self._on_standard_view(k))
             standard_menu.addAction(action)
 
         camera_menu.addAction(self._act_zoom_extents)   # la MISMA del botón
+        camera_menu.addAction(self._act_zoom_selection)
 
         camera_menu.addSeparator()
 
         action_proj = QAction(tr("Toggle Perspective / Parallel"), self)
-        # P went back to Push/Pull, which is what SketchUp's card says; the
-        # projection toggle has no key there at all, so it takes Shift+P —
+        action_proj.setStatusTip(tr(
+            "Switch between perspective and a parallel projection, where "
+            "sizes do not shrink with distance."))
+        # P went back to Push/Pull, the usual convention; the
+        # projection toggle usually has no key at all, so it takes Shift+P —
         # the same "the tool that yields keeps Shift+key" rule as the
         # Protractor and the centre arc.
         action_proj.setShortcut(QKeySequence("Shift+P"))
         action_proj.triggered.connect(self.viewport.toggle_projection)
         camera_menu.addAction(action_proj)
 
-        # Styles (SketchUp): the model's display look — face mode, edges,
+        # Two-Point Perspective: verticals stay vertical, as an
+        # architectural drawing wants them (José Castro Basso, FADU–UDELAR).
+        self._act_two_point = QAction(tr("Two-Point Perspective"), self)
+        self._act_two_point.setCheckable(True)
+        self._act_two_point.setStatusTip(tr(
+            "Perspective with vertical lines kept vertical"))
+        self._act_two_point.triggered.connect(self.viewport.toggle_two_point)
+        camera_menu.addAction(self._act_two_point)
+        camera_menu.aboutToShow.connect(
+            lambda: self._act_two_point.setChecked(
+                self.viewport.camera.two_point
+                and self.viewport.camera.perspective))
+
+        # Styles: the model's display look — face mode, edges,
         # background. Scenes remember the style; the composer's live-look
         # frames inherit it.
         from core.style import BUILTIN_STYLES
@@ -765,35 +1115,65 @@ class MainWindow(QMainWindow):
         self._style_actions: dict[str, QAction] = {}
         for preset in BUILTIN_STYLES:
             act = QAction(tr(preset.name), self)
+            act.setStatusTip(tr(_STYLE_TIPS.get(preset.name, "")))
             act.setCheckable(True)
             self._style_group.addAction(act)
             act.triggered.connect(
                 lambda _c=False, p=preset: self._apply_display_style(p))
             style_menu.addAction(act)
             self._style_actions[preset.name] = act
+        # X-ray on and off with one key: a glance at what hides behind a
+        # face, then back to the style you were in.
+        self._style_before_xray = (None, None)
+        self._act_xray_toggle = QAction(tr("Toggle X-ray"), self)
+        self._act_xray_toggle.setShortcut(QKeySequence("Alt+X"))
+        self._act_xray_toggle.setStatusTip(tr(
+            "Switch to X-ray, or back to the style you were in."))
+        self._act_xray_toggle.triggered.connect(self._toggle_xray)
+        style_menu.addSeparator()
+        style_menu.addAction(self._act_xray_toggle)
         style_menu.addSeparator()
         self._act_style_edges = QAction(tr("Edges"), self)
+        self._act_style_edges.setStatusTip(tr("Draw the edges of the model."))
         self._act_style_edges.setCheckable(True)
         self._act_style_edges.toggled.connect(
             lambda on: self._set_style_field("edges", on))
         style_menu.addAction(self._act_style_edges)
         self._act_style_profiles = QAction(tr("Profiles"), self)
+        self._act_style_profiles.setStatusTip(tr(
+            "Draw the outline of each shape with a thicker line."))
         self._act_style_profiles.setCheckable(True)
         self._act_style_profiles.toggled.connect(
             lambda on: self._set_style_field("profiles", on))
         style_menu.addAction(self._act_style_profiles)
+        self._act_style_back_edges = QAction(tr("Back edges"), self)
+        self._act_style_back_edges.setShortcut(QKeySequence("K"))
+        self._act_style_back_edges.setStatusTip(tr(
+            "Draw the edges hidden behind faces as dashed lines."))
+        self._act_style_back_edges.setCheckable(True)
+        self._act_style_back_edges.toggled.connect(
+            lambda on: self._set_style_field("back_edges", on))
+        style_menu.addAction(self._act_style_back_edges)
         self._sync_style_menu()
 
-        # How the model outside a group reads while you edit it (SketchUp's
-        # Model Info ▸ Components). Hiding it is also the fastest on a heavy
+        # How the model outside a group reads while you edit it (the usual
+        # Model Info ▸ Components setting). Hiding it is also the fastest on a heavy
         # import: what is not in the frame never reaches the GPU.
         rest_menu = camera_menu.addMenu(tr("Rest of model while editing"))
         self._rest_group = QActionGroup(self)
         self._rest_actions: dict[str, QAction] = {}
-        for key, label in (("normal", tr("Show normally")),
-                           ("fade", tr("Fade")),
-                           ("hide", tr("Hide (fastest)"))):
+        for key, label, tip in (
+                ("normal", tr("Show normally"),
+                 tr("While a group is edited, the rest of the model shows "
+                    "as usual.")),
+                ("fade", tr("Fade"),
+                 tr("While a group is edited, the rest of the model shows "
+                    "pale, so the group stands out.")),
+                ("hide", tr("Hide (fastest)"),
+                 tr("While a group is edited, the rest of the model is not "
+                    "drawn — the quickest on a heavy model."))):
             act = QAction(label, self)
+            act.setStatusTip(tip)
             act.setCheckable(True)
             act.setChecked(self.viewport.edit_rest_mode == key)
             self._rest_group.addAction(act)
@@ -804,27 +1184,36 @@ class MainWindow(QMainWindow):
 
         # Sun shadows (core/sun.py) — the checkbox mirrors the tray panel.
         self._act_shadows = QAction(tr("Shadows"), self)
+        self._act_shadows.setStatusTip(tr(
+            "Cast the sun's shadows; the Shadows panel sets the date, the "
+            "time and how dark they are."))
         self._act_shadows.setCheckable(True)
         self._act_shadows.toggled.connect(self._on_toggle_shadows)
         camera_menu.addAction(self._act_shadows)
 
-        # SketchUp's View ▸ Section Planes / Cuts / Fill — the same actions
+        # View ▸ Section Planes / Cuts / Fill — the same actions
         # as the Sections toolbar buttons (created in _build_toolbar).
         camera_menu.addSeparator()
         camera_menu.addAction(self._act_show_splanes)
         camera_menu.addAction(self._act_show_scuts)
         camera_menu.addAction(self._act_section_fill)
 
-        # SketchUp's View ▸ Hidden Objects / Hidden Geometry: what Hide put
+        # View ▸ Hidden Objects / Hidden Geometry: what Hide put
         # away comes back as a see-through grid and can be selected again
-        # (Marco, 2026-09-18, with the two SketchUp captures).
+        # (Marco, 2026-09-18, with two reference captures).
         camera_menu.addSeparator()
         self._act_hidden_objects = QAction(tr("Hidden Objects"), self)
+        self._act_hidden_objects.setStatusTip(tr(
+            "Show hidden groups and components as a see-through grid, so "
+            "they can be selected again."))
         self._act_hidden_objects.setCheckable(True)
         self._act_hidden_objects.toggled.connect(
             lambda on: self._set_hidden_view("show_hidden_objects", on))
         camera_menu.addAction(self._act_hidden_objects)
         self._act_hidden_geometry = QAction(tr("Hidden Geometry"), self)
+        self._act_hidden_geometry.setStatusTip(tr(
+            "Show hidden faces and edges as a see-through grid, so they "
+            "can be selected again."))
         self._act_hidden_geometry.setCheckable(True)
         self._act_hidden_geometry.toggled.connect(
             lambda on: self._set_hidden_view("show_hidden_geometry", on))
@@ -833,12 +1222,12 @@ class MainWindow(QMainWindow):
         camera_menu.addSeparator()
         for action in self._nav_actions.values():   # Orbit / Pan / Zoom / Zoom Window
             camera_menu.addAction(action)
-        # SketchUp's Camera ▸ Position Camera / Walk / Look Around.
+        # Camera ▸ Position Camera / Walk / Look Around.
         camera_menu.addSeparator()
-        for key in ("position_camera", "walk", "look_around"):
+        for key in ("position_camera", "walk", "look_around", "first_person"):
             camera_menu.addAction(self._tool_actions[key])
 
-        # Draw menu (SketchUp: the drawing tools, grouped by family)
+        # Draw menu (the drawing tools, grouped by family)
         draw_menu = menubar.addMenu(tr("Draw"))
         draw_menu.addAction(self._tool_actions["line"])
         draw_menu.addAction(self._tool_actions["freehand"])
@@ -851,7 +1240,7 @@ class MainWindow(QMainWindow):
         draw_menu.addSeparator()
         draw_menu.addAction(self._tool_actions["geopath"])
 
-        # Tools menu (SketchUp: select/modify/measure — drawing lives in Draw)
+        # Tools menu (select/modify/measure — drawing lives in Draw)
         tools_menu = menubar.addMenu(tr("Tools"))
         for keys in (("select", "eraser", "paint"),
                      ("move", "rotate", "scale", "flip"),
@@ -862,33 +1251,54 @@ class MainWindow(QMainWindow):
             for key in keys:
                 tools_menu.addAction(self._tool_actions[key])
             tools_menu.addSeparator()
+        # Tools ▸ Outer Shell, and Tools ▸ Solid Tools ▸ the rest.
+        tools_menu.addAction(self._tool_actions["outer_shell"])
+        solids_menu = QMenu(tr("Solid Tools"), tools_menu)
+        for key in ("solid_intersect", "solid_union", "solid_subtract",
+                    "solid_trim", "solid_split"):
+            solids_menu.addAction(self._tool_actions[key])
+        tools_menu.addMenu(solids_menu)
+        self._solids_menu = solids_menu        # a QMenu dies with its locals
+        tools_menu.addSeparator()
         action_3dtext = QAction(tool_icon("text3d"), tr("3D Text…"), self)
+        action_3dtext.setStatusTip(tr(_TEXT3D_TIP))
         action_3dtext.triggered.connect(self._on_insert_3d_text)
         tools_menu.addAction(action_3dtext)
         self._icon_actions.append((action_3dtext, "text3d"))
         tools_menu.addSeparator()
         action_profile = QAction(tr("Terrain profile of selection"), self)
+        action_profile.setStatusTip(tr(
+            "Draw the terrain profile along the selected path in the "
+            "profile panel."))
         action_profile.triggered.connect(self._on_terrain_profile)
         tools_menu.addAction(action_profile)
         tools_menu.addSeparator()
         action_cancel = QAction(tr("Cancel current tool"), self)
+        action_cancel.setStatusTip(tr(
+            "Stop what the tool is doing; with nothing in progress, clear "
+            "the selection."))
         action_cancel.setShortcut(QKeySequence("Esc"))
         action_cancel.triggered.connect(self._cancel_tool)
         tools_menu.addAction(action_cancel)
 
-        # Window menu (SketchUp: panels + app preferences)
+        # Window menu (panels + app preferences)
         window_menu = menubar.addMenu(tr("Window"))
 
-        toggle_tray = self.tray.toggleViewAction()
-        toggle_tray.setText(tr("Properties panel"))
-        window_menu.addAction(toggle_tray)
-
-        toggle_georef = self.georef_tray.toggleViewAction()
-        toggle_georef.setText(tr("Terrain panel"))
-        window_menu.addAction(toggle_georef)
+        # Every tray, extension tabs included, has its entry here — and the
+        # same list opens on a right-click over the tabs. Only this list
+        # says a tray is unwanted: that choice is remembered and every other
+        # tray opens at start-up (see _show_default_trays). Built when it
+        # opens: extension tabs are added after the menus.
+        panels_menu = QMenu(tr("Panels"), window_menu)
+        panels_menu.aboutToShow.connect(
+            lambda m=panels_menu: self._fill_panels_menu(m))
+        window_menu.addMenu(panels_menu)
+        self._panels_menu = panels_menu
 
         toggle_profile = self.profile_dock.toggleViewAction()
         toggle_profile.setText(tr("Terrain profile"))
+        toggle_profile.setStatusTip(tr(
+            "Show or hide the panel with the terrain profile along a path."))
         window_menu.addAction(toggle_profile)
 
 
@@ -897,9 +1307,13 @@ class MainWindow(QMainWindow):
         # working while the menu bar itself is hidden.
         window_menu.addSeparator()
         clean_action = QAction(tr("Clean screen"), self)
+        clean_action.setStatusTip(tr(
+            "Fold away every toolbar, panel and bar so only the model "
+            "shows; once more brings them all back."))
         clean_action.setShortcut(QKeySequence("Ctrl+0"))
         clean_action.setCheckable(True)
-        clean_action.toggled.connect(self._toggle_clean_screen)
+        clean_action.toggled.connect(self._route_window_toggle(
+            "_act_clean_screen", self._toggle_clean_screen))
         self.addAction(clean_action)
         window_menu.addAction(clean_action)
         self._act_clean_screen = clean_action
@@ -909,34 +1323,64 @@ class MainWindow(QMainWindow):
 
         window_menu.addSeparator()
         prefs_action = QAction(tr("Preferences…"), self)
+        prefs_action.setStatusTip(tr(
+            "Change the units, auto-save, icons and the rest of the "
+            "settings."))
         prefs_action.triggered.connect(self._on_preferences)
         window_menu.addAction(prefs_action)
         self._build_language_menu(window_menu)
+
+        # Blender's F3 / a command Search: one box that runs any command
+        # by name (views/command_search.py). Made BEFORE the plugins load,
+        # so a plugin asking for F3 finds it taken; on the window too, so
+        # it answers with the menu bar hidden (clean screen).
+        search_action = QAction(tr("Search commands…"), self)
+        search_action.setStatusTip(tr(
+            "Find any command by typing part of its name, and run it."))
+        search_action.setObjectName("command_search")
+        search_action.setShortcut(QKeySequence("F3"))
+        search_action.triggered.connect(self._on_command_search)
+        self.addAction(search_action)
 
         # Extensions — third-party plugin tools (core.extensions engine).
         self._build_extensions_menu(menubar)
 
         help_menu = menubar.addMenu(tr("Help"))
+        help_menu.addAction(search_action)
+        help_menu.addSeparator()
         get_models_action = QAction(tr("Get more models and textures…"), self)
+        get_models_action.setStatusTip(tr(
+            "Free websites with models and textures that open in "
+            "IngeTrazo."))
         get_models_action.triggered.connect(self._on_get_models)
         help_menu.addAction(get_models_action)
         # Only as an AppImage: put a launcher in the menu, or take it away.
         from core.appimage import appimage_path
         if appimage_path() is not None:
             add_act = QAction(tr("Add to the applications menu"), self)
+            add_act.setStatusTip(tr(
+                "Put a launcher for this AppImage in the system's "
+                "applications menu."))
             add_act.triggered.connect(self.add_appimage_to_menu)
             help_menu.addAction(add_act)
             rm_act = QAction(tr("Remove from the applications menu"), self)
+            rm_act.setStatusTip(tr(
+                "Take this AppImage's launcher out of the system's "
+                "applications menu."))
             rm_act.triggered.connect(self.remove_appimage_from_menu)
             help_menu.addAction(rm_act)
             help_menu.addSeparator()
         about_action = QAction(tr("About IngeTrazo"), self)
+        about_action.setStatusTip(tr(
+            "The version, the authors and the licence of IngeTrazo."))
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
+        # A letter typed in an open menu searches that menu (Blender 4).
+        from views.command_search import install_menu_typing
+        install_menu_typing(self)
 
     # ---- Language -----------------------------------------------------------
-    _LANGUAGE_NAMES = {"en": "English", "es": "Español",
-                       "pt-BR": "Português (Brasil)"}
+    _LANGUAGE_NAMES = LANGUAGE_NAMES
 
     def _build_language_menu(self, parent_menu) -> None:
         lang_menu = parent_menu.addMenu(tr("Language"))
@@ -944,6 +1388,9 @@ class MainWindow(QMainWindow):
         group.setExclusive(True)
         for code in available_languages():
             action = QAction(self._LANGUAGE_NAMES.get(code, code), self)
+            action.setStatusTip(tr(
+                "Show the menus and messages in this language, from the "
+                "next start."))
             action.setCheckable(True)
             action.setChecked(code == current_language())
             action.triggered.connect(lambda _checked, c=code: self._on_set_language(c))
@@ -951,10 +1398,123 @@ class MainWindow(QMainWindow):
             lang_menu.addAction(action)
 
     # ---- Sidebar strip (LibreOffice-style) ---------------------------------
+    def _show_default_trays(self, st) -> None:
+        """Properties, BIM and Terrain always open at start-up — a tray
+        stays closed only when it was closed from the Window menu (Marco,
+        24-09: «que siempre se muestren por defecto con opción de ocultarlas
+        desde el menú Ventana»). A saved layout alone (a folded sidebar, a
+        tray lost by the old fold) does not keep one away."""
+        hidden = self._hidden_tray_names(st)
+        docks = self._sidebar_docks()
+        for d in docks:
+            self._keep_docked(d)
+            d.setVisible(d.objectName() not in hidden)
+            # Qt's own dock list (right-click on a toolbar) hides one too.
+            d.toggleViewAction().triggered.connect(
+                lambda on, dock=d: self._remember_tray_choice(dock, on))
+        if not self.tray.isHidden():
+            self.tray.raise_()
+        # Filled now too, not only when it opens: F3 finds each tab there.
+        menu = getattr(self, "_panels_menu", None)
+        if menu is not None:
+            self._fill_panels_menu(menu)
+
+    def _keep_docked(self, dock) -> None:
+        """The trays stay in the sidebar, as Blender's side panel does
+        (Marco, 29-09 — floating tabs were tried and dropped): no floating,
+        and one a saved layout left floating goes back among the tabs."""
+        from PySide6.QtWidgets import QDockWidget
+        dock.setFeatures(dock.features() & ~QDockWidget.DockWidgetFloatable)
+        if dock.isFloating():
+            dock.setFloating(False)
+            if dock.titleBarWidget() is None:
+                dock.setTitleBarWidget(QWidget(dock))
+            if self.dockWidgetArea(dock) != Qt.RightDockWidgetArea:
+                self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            if dock is not self.tray:
+                self.tabifyDockWidget(self.tray, dock)
+
+    @staticmethod
+    def _hidden_tray_names(st) -> set:
+        raw = st.value("ui/hidden_trays", []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return {str(x) for x in raw}
+
+    def _remember_tray_choice(self, dock, shown: bool) -> None:
+        st = QSettings()
+        hidden = self._hidden_tray_names(st)
+        if shown:
+            hidden.discard(dock.objectName())
+        else:
+            hidden.add(dock.objectName())
+        st.setValue("ui/hidden_trays", sorted(hidden))
+
+    def _fill_panels_menu(self, menu) -> None:
+        """One checkable entry per side-tray tab (Marco, 29-09: «cuando
+        tenga demasiadas pestañas… configurar para no mostrar»)."""
+        menu.clear()
+        for dock in self._sidebar_docks():
+            dock.toggleViewAction().setStatusTip(
+                tr("Show or hide this tab of the side tray."))
+            act = menu.addAction(dock.windowTitle())
+            act.setStatusTip(tr("Show or hide this tab of the side tray."))
+            act.setCheckable(True)
+            act.setChecked(not dock.isHidden())
+            act.triggered.connect(
+                lambda on, d=dock: self.set_tray_shown(d, on))
+        menu.addSeparator()
+        every = menu.addAction(tr("Show all panels"))
+        every.setStatusTip(tr("Bring back every tab of the side tray."))
+        every.triggered.connect(self._show_all_trays)
+
+    def set_tray_shown(self, dock, shown: bool) -> None:
+        """Show (in front) or hide one side-tray tab and remember it. A
+        folded sidebar unfolds first: asking for a tab means seeing it."""
+        if shown:
+            act = getattr(self, "_act_sidebar", None)
+            if act is not None and not act.isChecked():
+                act.setChecked(True)
+            dock.show()
+            dock.raise_()
+        else:
+            dock.hide()
+        self._remember_tray_choice(dock, shown)
+
+    def _show_all_trays(self) -> None:
+        for dock in self._sidebar_docks():
+            self.set_tray_shown(dock, True)
+        if not self.tray.isHidden():
+            self.tray.raise_()
+
+    def _tray_tab_bar_at(self, pos) -> bool:
+        """Whether ``pos`` (window coordinates) is on the tab bar of the
+        side trays — the tabs QMainWindow draws for tabified docks."""
+        from PySide6.QtWidgets import QTabBar
+        child = self.childAt(pos)
+        while child is not None and child is not self:
+            if isinstance(child, QTabBar):
+                return True
+            child = child.parentWidget()
+        return False
+
+    def contextMenuEvent(self, event) -> None:
+        """Right-click on the tray tabs → the Window ▸ Panels list, instead
+        of Qt's toolbar-and-dock menu."""
+        if self._tray_tab_bar_at(event.pos()):
+            menu = QMenu(self)
+            self._fill_panels_menu(menu)
+            menu.exec(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
     def _sidebar_docks(self) -> list:
         return [d for d in (getattr(self, "tray", None),
                             getattr(self, "bim_tray", None),
-                            getattr(self, "georef_tray", None)) if d is not None]
+                            getattr(self, "georef_tray", None),
+                            *getattr(self, "_extension_docks", ()))
+                if d is not None]
 
     def _build_sidebar_handle(self) -> None:
         """LibreOffice's sidebar handle: a slim button sitting ON the line
@@ -970,8 +1530,10 @@ class MainWindow(QMainWindow):
         act.setCheckable(True)
         act.setChecked(True)
         act.setShortcut(QKeySequence("Ctrl+F5"))
-        act.setToolTip(tr("Show or hide the sidebar (Ctrl+F5)"))
-        act.toggled.connect(self._set_sidebar_visible)
+        from views.shortcuts import set_tooltip
+        set_tooltip(act, tr("Show or hide the sidebar"))
+        act.toggled.connect(self._route_window_toggle(
+            "_act_sidebar", self._set_sidebar_visible))
         self.addAction(act)
         self._act_sidebar = act
 
@@ -1036,7 +1598,10 @@ class MainWindow(QMainWindow):
             if top is not None and top in shown:
                 top.raise_()
         else:
-            self._sidebar_was = [d for d in docks if d.isVisible()]
+            # OPEN, not on screen: a tray tabbed behind another is not
+            # visible, and unfolding left BIM and Terrain closed for good.
+            self._sidebar_was = [d for d in docks
+                                 if d.toggleViewAction().isChecked()]
             self._sidebar_top = next((d for d in docks if d.isVisible()
                                       and not d.visibleRegion().isEmpty()), None)
             for d in docks:
@@ -1122,8 +1687,19 @@ class MainWindow(QMainWindow):
 
     def _on_preferences(self) -> None:
         """Window ▸ Preferences: the scattered QSettings in one dialog."""
+        self.open_preferences()
+
+    def open_preferences(self, shortcut_of=None) -> None:
+        """Preferences; on the Keyboard shortcuts page with that action
+        picked when ``shortcut_of`` is given (right click in F3)."""
         from views.preferences_dialog import PreferencesDialog
-        PreferencesDialog(self).exec()
+        dlg = PreferencesDialog(self)
+        if shortcut_of is not None:
+            dlg.show_shortcut_of(shortcut_of)
+        dlg.exec()
+        # Freed now, not when the window goes: each opening used to leave
+        # a hidden dialog hanging from the window until the app closed.
+        dlg.deleteLater()
 
     def _on_set_language(self, code: str) -> None:
         """Persist the chosen UI language (applied on next start)."""
@@ -1155,18 +1731,38 @@ class MainWindow(QMainWindow):
         # ambiguity that silently disables the built-in key for both.
         taken = {a.shortcut().toString() for a in self.findChildren(QAction)
                  if not a.shortcut().isEmpty()}
+        self._ext_menu = ext_menu           # ExtensionApp.add_menu_action
+        self._ext_taken_keys = taken
 
         count = 0
+        from views.extension_api import ExtensionApp
+        for plug in list(plugins):
+            if plug.setup is None:
+                continue
+            try:
+                plug.setup(ExtensionApp(self, plug.stem))
+            except Exception as exc:  # noqa: BLE001 — never break startup
+                log.exception("plugin %r setup failed", plug.stem)
+                from core.extensions import PluginError
+                errors.append(PluginError(
+                    plug.stem, plug.path, f"{type(exc).__name__}: {exc}"))
+                plugins.remove(plug)
+                continue
+            if not plug.tools:
+                count += 1                  # a panel-only extension counts
         for plug in plugins:
             for tool in plug.tools:
                 key = f"plugin_{plug.stem}_{type(tool).__name__}"
                 self._tools[key] = tool
                 action = QAction(tr(tool.name), self)
+                if tool.description:
+                    action.setStatusTip(tr(tool.description))
                 if tool.shortcut:
                     seq = QKeySequence(tool.shortcut).toString()
                     if seq and seq not in taken:
                         action.setShortcut(QKeySequence(tool.shortcut))
-                        action.setToolTip(f"{tr(tool.name)}  ({tool.shortcut})")
+                        from views.shortcuts import set_tooltip
+                        set_tooltip(action, tr(tool.name))
                         taken.add(seq)
                     else:
                         log.warning("plugin %r wants shortcut %r, already "
@@ -1186,12 +1782,99 @@ class MainWindow(QMainWindow):
         if count == 0 and not errors:
             ext_menu.addAction(tr("(no plugins found)")).setEnabled(False)
 
+        self._add_example_extensions_menu(ext_menu)
+
         # The on-ramp for plugin authors: their folder and the dev guide.
         ext_menu.addSeparator()
         act = ext_menu.addAction(tr("Open plugins folder"))
+        act.setStatusTip(tr(
+            "Open the folder for your plugins; one put there loads at the "
+            "next start."))
         act.triggered.connect(self._on_open_plugins_folder)
         act = ext_menu.addAction(tr("Develop a plugin…"))
+        act.setStatusTip(tr(
+            "Open the guide to writing plugins for IngeTrazo."))
         act.triggered.connect(self._on_develop_plugin)
+
+    @staticmethod
+    def example_extensions() -> list:
+        """``(path, title, blurb)`` of each example extension shipped with
+        the app (``examples/extensions``) — installed by the user, never
+        loaded on their own: what only some need stays out of the core."""
+        import ast
+        from core.paths import app_root
+        folder = app_root() / "examples" / "extensions"
+        out = []
+        # A single ``x.py`` or a package ``x/__init__.py`` — a bigger
+        # extension (CAM, PR #132) is a folder, and the loader takes both.
+        entries = sorted(folder.iterdir()) if folder.is_dir() else []
+        for path in entries:
+            if path.suffix == ".py" and path.is_file():
+                src = path
+            elif path.is_dir() and (path / "__init__.py").is_file():
+                src = path / "__init__.py"
+            else:
+                continue
+            try:
+                doc = ast.get_docstring(ast.parse(src.read_text("utf-8"))) or ""
+            except (OSError, SyntaxError, ValueError):
+                doc = ""
+            first, _, rest = doc.partition("\n")
+            title = first.split(" — ")[0].strip() or path.stem
+            blurb = rest.strip().split("\n\n")[0].replace("\n", " ")
+            out.append((path, title, blurb))
+        return out
+
+    def _add_example_extensions_menu(self, ext_menu) -> None:
+        """Extensions ▸ Example extensions: each one ticked when installed;
+        a click installs it into the user's plugins folder, or removes it.
+        Takes effect at the next start, like any plugin."""
+        examples = self.example_extensions()
+        if not examples:
+            return
+        from PySide6.QtWidgets import QMenu
+        from core.extensions import user_plugins_dir
+        ext_menu.addSeparator()
+        sub = QMenu(tr("Example extensions"), ext_menu)
+        ext_menu.addMenu(sub)
+        for path, title, blurb in examples:
+            act = sub.addAction(title)
+            act.setCheckable(True)
+            act.setChecked((user_plugins_dir() / path.name).exists())
+            act.setToolTip(blurb)
+            act.setStatusTip(blurb)
+            act.toggled.connect(
+                lambda on, p=path, t=title: self._toggle_example_extension(
+                    p, t, on))
+        sub.setToolTipsVisible(True)
+
+    def _toggle_example_extension(self, path, title: str, on: bool) -> None:
+        import shutil
+        from core.extensions import user_plugins_dir
+        target = user_plugins_dir() / path.name
+        try:
+            if on:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if path.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                    shutil.copytree(path, target, ignore=shutil.ignore_patterns(
+                        "__pycache__", "*.pyc"))
+                else:
+                    shutil.copyfile(path, target)
+                msg = tr("«{name}» installed. Restart IngeTrazo to use it.",
+                         name=title)
+            elif target.is_dir():
+                shutil.rmtree(target)
+                msg = tr("«{name}» removed. Restart IngeTrazo to unload it.",
+                         name=title)
+            else:
+                target.unlink(missing_ok=True)
+                msg = tr("«{name}» removed. Restart IngeTrazo to unload it.",
+                         name=title)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Example extensions"), str(exc))
+            return
+        QMessageBox.information(self, tr("Example extensions"), msg)
 
     PLUGIN_GUIDE_URL = ("https://github.com/ingelibre/ingetrazo"
                         "/blob/main/docs/plugins.md")
@@ -1211,13 +1894,45 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl(self.PLUGIN_GUIDE_URL))
 
+    # ---- Extension panels (views.extension_api.ExtensionApp.add_panel) -------
+    def _register_extension_dock(self, dock) -> None:
+        """Give an extension's panel what the built-in trays get for free.
+
+        ``setup(app)`` may add a panel after ``restoreState`` laid the window
+        out, and an extension may add one later still (the first time its
+        tool runs), so here a panel gets:
+
+        - **its saved place.** ``restoreDockWidget`` puts it back where the
+          user left it last session (area, size, floating, tabbed) when the
+          window state knows its ``objectName`` — which is why that name
+          must be stable across versions;
+        - **a first place** when there is none: tabbed with the trays;
+        - **a way back** when closed: Window ▸ Panels lists every tab."""
+        if not self.restoreDockWidget(dock):
+            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            anchor = next((d for d in reversed(self._sidebar_docks())
+                           if d is not dock and d.objectName() != dock.objectName()), None)
+            if anchor is not None:
+                self.tabifyDockWidget(anchor, dock)
+        self._extension_docks.append(dock)
+        self._keep_docked(dock)
+        menu = getattr(self, "_panels_menu", None)
+        if menu is not None:
+            self._fill_panels_menu(menu)
+
+    def extension_panels(self) -> dict:
+        """``objectName`` → dock for every panel an extension added."""
+        return {d.objectName(): d for d in self._extension_docks}
+
     def _activate_plugin_tool(self, key: str) -> None:
         """Run a plugin tool from the Extensions menu.
 
         Plugin tools are one-shot (they open a dialog and return): the
         viewport's active tool is left untouched, so the status bar keeps
         telling the truth about which drawing tool is current."""
-        self._tools[key].on_activate(self.viewport)
+        tool = self._tools[key]
+        self._remember_command(tool.name, lambda: tool.on_activate(self.viewport))
+        tool.on_activate(self.viewport)
 
     def _on_gl_ready(self, info: dict) -> None:
         """A viewport drawn on the CPU is the usual reason a Windows machine
@@ -1235,69 +1950,68 @@ class MainWindow(QMainWindow):
                 "IngeTrazo asked Windows for the high-performance GPU; it "
                 "applies the next time you open the program."), 20000)
 
+    def _on_command_search(self) -> None:
+        from views.command_search import open_search
+        open_search(self)
+
     def _on_about(self) -> None:
         from core.glinfo import describe
+        from views.about_dialog import AboutDialog
         gl_line = describe(getattr(self.viewport, "gl_info", {}))
-        gl_html = f"<p><small>OpenGL: {gl_line}</small></p>" if gl_line else ""
-        QMessageBox.about(
-            self,
-            tr("About IngeTrazo"),
-            "<h3>IngeTrazo</h3>"
-            f"<p>{tr('Version')} {__version__}</p>"
-            f"{gl_html}"
-            f"<p>{tr('Free 3D modeler for architecture, civil engineering and 3D printing.')}</p>"
-            f"<p>{tr('Created by')} <b>Marco Sumari Tellez</b><br>"
-            f"{tr('Civil Engineer — Arequipa, Peru')}</p>"
-            # The people outside the project whose work is IN it. A draftsman
-            # who files what does not answer like SketchUp and a reviewer who
-            # says what the drafting norms require are contributions the code
-            # could not have reached on its own, and they leave no trace
-            # anywhere the user looks. AUTHORS says what each one gave.
-            f"<p>{tr('With contributions from')}<br>"
-            "<b>Pedro Caeiro</b> — "
-            f"{tr('draftsman; pull requests and issue reports')}<br>"
-            "<b>Rafael García Rodríguez</b> — "
-            f"{tr('draftsman; reviews and drafting standards')}<br>"
-            "<b>Ahsan Mehmood</b> — "
-            f"{tr('author of OpenSKP, the SketchUp reader')}</p>"
-            f"<p>{tr('Licensed under GPL-3.0-or-later.')}<br>"
-            "<a href='https://github.com/ingelibre/ingetrazo'>"
-            "github.com/ingelibre/ingetrazo</a></p>",
-        )
+        # The people outside the project whose work is IN it turn in a
+        # carousel there; AUTHORS says what each one gave.
+        AboutDialog(self, __version__, gl_line or "").exec()
 
     def _file_actions(self) -> list[QAction]:
         actions = []
 
         new_action = QAction(tr("New"), self)
+        new_action.setStatusTip(tr(
+            "Start a new, empty model in this window."))
         new_action.setShortcut(QKeySequence.New)
         new_action.triggered.connect(self._on_new)
         actions.append(new_action)
 
+        # A second IngeTrazo beside this one: each window is its own
+        # document, and Copy/Paste now crosses between them (issue #76).
+        window_action = QAction(tr("New Window"), self)
+        window_action.setStatusTip(tr(
+            "Open another IngeTrazo window with its own document; copy "
+            "and paste work between them."))
+        window_action.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        window_action.triggered.connect(self._on_new_window)
+        actions.append(window_action)
+
         open_action = QAction(tr("Open…"), self)
+        open_action.setStatusTip(tr(
+            "Open an IngeTrazo document (.igz) in place of this one."))
         open_action.setShortcut(QKeySequence.Open)
         open_action.triggered.connect(self._on_open)
         actions.append(open_action)
 
         # The last documents, one click away (asked for since the 0.4.x
-        # triage; SketchUp's File ▸ Open Recent). Filled when shown, so a
+        # triage; the usual File ▸ Open Recent). Filled when shown, so a
         # file deleted meanwhile just drops off the list.
         self._recent_menu = QMenu(tr("Open Recent"), self)
         self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
         actions.append(self._recent_menu.menuAction())
 
         recover_action = QAction(tr("Recover a discarded auto-save…"), self)
-        recover_action.setToolTip(tr(
+        recover_action.setStatusTip(tr(
             "Auto-saved copies retired when a session was closed without "
             "saving — the last ones are kept here for a second chance."))
         recover_action.triggered.connect(self._on_recover_discarded)
         actions.append(recover_action)
 
         save_action = QAction(tr("Save"), self)
+        save_action.setStatusTip(tr(_SAVE_TIP))
         save_action.setShortcut(QKeySequence.Save)
         save_action.triggered.connect(self._on_save)
         actions.append(save_action)
 
         save_as_action = QAction(tr("Save As…"), self)
+        save_as_action.setStatusTip(tr(
+            "Save the document under another name or in another folder."))
         save_as_action.setShortcut(QKeySequence.SaveAs)
         save_as_action.triggered.connect(self._on_save_as)
         actions.append(save_as_action)
@@ -1307,54 +2021,112 @@ class MainWindow(QMainWindow):
         # One home for everything that comes in, one for everything that
         # goes out — the flat list had import/export items scattered.
         import_menu = QMenu(tr("Import"), self)
-        for label, handler in (
+        for label, tip, handler in (
             (tr("IngeTrazo document as component (.igz)…"),
+             tr("Bring another IngeTrazo document in as one component, "
+                "placed with a click."),
              self._on_import_igz),
-            (tr("SketchUp (.skp)…"), self._on_import_skp),
-            (tr("COLLADA (.dae)…"), self._on_import_dae),
-            (tr("glTF/GLB (.glb)…"), self._on_import_glb),
-            (tr("Wavefront OBJ (.obj)…"), self._on_import_obj),
-            (tr("Image (PNG / JPG)…"), self._on_import_image),
-            (tr("Orthomosaic (GeoTIFF)…"), self._on_import_orthophoto),
-            (tr("AutoCAD DWG (.dwg)…"), self._on_import_dwg),
-            (tr("AutoCAD DXF (.dxf)…"), self._on_import_dxf),
-            (tr("Georeference (KML / GeoJSON)…"), self._on_import_georef),
-            (tr("Survey points CSV (UTM)…"), self._on_import_survey_points),
-            (tr("Photogrammetric mesh (WebODM)…"), self._on_import_photomesh),
+            (tr("SKP (.skp)…"),
+             tr("Bring in a .skp model with its groups, materials and "
+                "textures."),
+             self._on_import_skp),
+            (tr("COLLADA (.dae)…"),
+             tr("Bring in a COLLADA model with its materials and "
+                "textures."),
+             self._on_import_dae),
+            (tr("glTF/GLB (.glb)…"),
+             tr("Bring in a glTF binary model with its materials and "
+                "textures."),
+             self._on_import_glb),
+            (tr("Wavefront OBJ (.obj)…"),
+             tr("Bring in a Wavefront OBJ model with its materials."),
+             self._on_import_obj),
+            (tr("STL mesh (*.stl)…"),
+             tr("Bring in an STL mesh — a 3D print or a scan — at the "
+                "scale you choose."),
+             self._on_import_stl),
+            (tr("Image (PNG / JPG)…"),
+             tr("Place a picture in the model to trace over."),
+             self._on_import_image),
+            (tr("Orthomosaic (GeoTIFF)…"),
+             tr("Lay a GeoTIFF orthomosaic under the model at its true "
+                "place and size, to trace over."),
+             self._on_import_orthophoto),
+            (tr("AutoCAD DWG (.dwg)…"),
+             tr("Bring in the linework of an AutoCAD drawing, one group per "
+                "layer."),
+             self._on_import_dwg),
+            (tr("AutoCAD DXF (.dxf)…"),
+             tr("Bring in the linework of an AutoCAD drawing, one group per "
+                "layer."),
+             self._on_import_dxf),
+            (tr("Georeference (KML / GeoJSON)…"),
+             tr("Bring in a KML, KMZ or GeoJSON alignment as paths in their "
+                "true place, ready to profile or measure."),
+             self._on_import_georef),
+            (tr("Survey points CSV (UTM)…"),
+             tr("Bring in surveyed points from a CSV file with UTM "
+                "coordinates."),
+             self._on_import_survey_points),
+            (tr("Photogrammetric mesh (WebODM)…"),
+             tr("Bring in a WebODM drone survey in its true place, as a "
+                "mesh to trace over."),
+             self._on_import_photomesh),
         ):
             act = QAction(label, self)
+            act.setStatusTip(tip)
             act.triggered.connect(handler)
             import_menu.addAction(act)
         import_menu.addSeparator()
         clear_tex = QAction(tr("Clear imported texture cache…"), self)
-        clear_tex.setToolTip(tr(
+        clear_tex.setStatusTip(tr(
             "Delete the images extracted from imported .skp files."))
         clear_tex.triggered.connect(self._on_clear_texture_cache)
         import_menu.addAction(clear_tex)
         actions.append(import_menu)
 
         export_menu = QMenu(tr("Export"), self)
-        for label, handler in (
-            (tr("IFC (BIM)…"), self._on_export_ifc),
-            (tr("glTF / GLB (3D, single file)…"), self._on_export_glb),
-            (tr("COLLADA (.dae)…"), self._on_export_dae),
-            (tr("STL (3D printing)…"), self._on_export_stl),
-            (tr("Wavefront OBJ (.obj)…"), self._on_export_obj),
-            (tr("SketchUp (.skp)…"), self._on_export_skp),
-            (tr("Image (PNG / JPG)…"), self._on_export_image),
+        for label, tip, handler in (
+            (tr("IFC (BIM)…"),
+             tr("Save the model as IFC for BIM software, with what the BIM "
+                "panel tagged."),
+             self._on_export_ifc),
+            (tr("glTF / GLB (3D, single file)…"),
+             tr("Save the model as one .glb file with its materials and "
+                "textures, for Blender and web viewers."),
+             self._on_export_glb),
+            (tr("COLLADA (.dae)…"),
+             tr("Save the model as COLLADA, which most 3D programs open; "
+                "the texture images go beside the file."),
+             self._on_export_dae),
+            (tr("STL (3D printing)…"),
+             tr("Save the model as an STL mesh for 3D printing."),
+             self._on_export_stl),
+            (tr("Wavefront OBJ (.obj)…"),
+             tr("Save the model as Wavefront OBJ with its materials."),
+             self._on_export_obj),
+            (tr("Current view as DXF…"),
+             tr("Save the view on screen as a 2D line drawing for CAD, with "
+                "the hidden lines removed."),
+             self._on_export_view_dxf),
+            (tr("Image (PNG / JPG)…"),
+             tr("Save the view on screen as a PNG or JPG picture at the "
+                "width you choose."),
+             self._on_export_image),
         ):
             act = QAction(label, self)
+            act.setStatusTip(tip)
             act.triggered.connect(handler)
             export_menu.addAction(act)
         actions.append(export_menu)
 
-        # Components moved to the Properties tray (SketchUp-style panel with
+        # Components moved to the Properties tray (a panel with
         # static thumbnails) — see views/tray.py::ComponentsPanel.
 
         actions.append(self._separator())
 
         composer_action = QAction(tr("Sheet composer…"), self)
-        composer_action.setToolTip(tr(
+        composer_action.setStatusTip(tr(
             "Lay out the model on paper at exact scale and export a PDF plan."))
         composer_action.triggered.connect(self._on_open_composer)
         actions.append(composer_action)
@@ -1362,6 +2134,8 @@ class MainWindow(QMainWindow):
         actions.append(self._separator())
 
         quit_action = QAction(tr("Quit"), self)
+        quit_action.setStatusTip(tr(
+            "Close IngeTrazo, offering to save what has not been saved."))
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
         actions.append(quit_action)
@@ -1379,12 +2153,18 @@ class MainWindow(QMainWindow):
         # tabs): one click from the model to any sheet.
         from views.sheet_tabs import SheetStatusBar
         bar = SheetStatusBar(self, on_model=self._show_model,
-                             on_sheet=self._show_sheet,
+                             on_sheet=self._show_strip_sheet,
                              on_new=self._show_new_sheet,
-                             on_menu=self._sheet_tab_menu)
+                             on_menu=self._strip_sheet_menu)
         self.setStatusBar(bar)
         self._sheet_tabs = bar.tabs
-        # ONE hint for the tool and its step (SketchUp's status bar) goes in
+        # Ctrl+Tab: to the sheets and back (#91, @pacaeiro) — the last sheet
+        # shown, as the strip's own tab; Ctrl+Shift+Tab too, with only two
+        # places to go. A document without sheets gets its first one.
+        from PySide6.QtGui import QShortcut
+        for seq in ("Ctrl+Tab", "Ctrl+Shift+Tab"):
+            QShortcut(QKeySequence(seq), self, activated=self._to_sheets)
+        # ONE hint for the tool and its step (the usual status bar) goes in
         # as the bar's BASE message — SheetStatusBar keeps the Model | Sheet
         # strip glued to the left and restores the base after a timed
         # message (flash_status). A widget of our own here landed LEFT of
@@ -1393,6 +2173,10 @@ class MainWindow(QMainWindow):
         # every shortcut at once.
         self._tool_label = QLabel(tr("Tool: none"))
         bar.addPermanentWidget(self._tool_label)
+        # Not shown any more: the tool's name leads the hint instead, and the
+        # 250 px it held go to the hint (Marco, 23-09 — the icon of the
+        # tool is highlighted anyway). Kept as the record other code reads.
+        self._tool_label.hide()
         self._refresh_sheet_tabs()
 
         # Live UTM readout, the way a CAD shows coordinates. Local scene metres
@@ -1400,16 +2184,25 @@ class MainWindow(QMainWindow):
         # goes on a plan, into a GPS, and into a report. Only shown once the
         # scene has a datum — there is no coordinate without one.
         self._coord_label = QLabel("")
-        self._coord_label.setStyleSheet("color:#5a6472; padding:0 8px;")
+        theme_style(self._coord_label, "color:{muted}; padding:0 8px;")
         bar.addPermanentWidget(self._coord_label)
 
-        # SketchUp-style Measurements box (VCB), pinned bottom-right: a caption
+        # What Repeat would run, on the right while Select is up — the VCB
+        # box is hidden then, so the corner is free. It cannot ride on the
+        # Select hint: in Spanish that line would pass the 112-character
+        # cap and lose its end (test_status_hints_fit).
+        self._repeat_label = QLabel("")
+        theme_style(self._repeat_label, "color:{muted}; padding:0 8px;")
+        self._repeat_label.hide()
+        bar.addPermanentWidget(self._repeat_label)
+
+        # Measurements box (VCB), pinned bottom-right: a caption
         # ("Length" / "Dimensions" / "Distance") plus a boxed field showing the
         # live measurement, or what you're typing (highlighted while typing).
         self._vcb_buffer = ""
         self._vcb_live = ""
         self._vcb_name = QLabel("")
-        self._vcb_name.setStyleSheet("color:#5a6472; padding:0 4px;")
+        theme_style(self._vcb_name, "color:{muted}; padding:0 4px;")
         self._vcb_value = QLabel("")
         self._vcb_value.setMinimumWidth(130)
         self._vcb_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1470,9 +2263,21 @@ class MainWindow(QMainWindow):
         from views.status_hints import hint_for
         vp = self.viewport
         tool = vp.active_tool
-        text = hint_for(self._tool_key(tool), tool,
-                        getattr(vp, "nav_mode", None),
+        nav = getattr(vp, "nav_mode", None)
+        text = hint_for(self._tool_key(tool), tool, nav,
                         getattr(vp, "linear_inference_mode", None))
+        # The tool's name leads its hint (it used to sit apart, on the right).
+        if nav is not None:
+            name = tr(nav.replace("_", " ").capitalize())
+        elif tool is not None:
+            name = tr(tool.name)
+        else:
+            name = ""
+        self._refresh_repeat_hint()
+        if name and text:
+            text = f"{name} — {text}"
+        elif name:
+            text = name
         if text != getattr(bar, "_base", None):
             if hasattr(bar, "_base"):
                 # Keep a running timed message; only the base changes.
@@ -1493,6 +2298,9 @@ class MainWindow(QMainWindow):
         coord = pending.get("coordinate")
         if coord is not None and coord != self._coord_label.text():
             self._coord_label.setText(coord)
+            # The compact readout above; the full one, zone included, on hover.
+            self._coord_label.setToolTip(
+                getattr(self.viewport, "_last_coordinate_full", "") or "")
         meas = pending.get("measurement")
         if meas is not None and meas != getattr(self, "_vcb_live", None):
             self._on_measurement(meas)
@@ -1523,6 +2331,10 @@ class MainWindow(QMainWindow):
 
     # ---- Tool routing -------------------------------------------------------
     def _activate_tool(self, key: str) -> None:
+        if self._tool_filter is not None and key not in self._tool_filter:
+            self.statusBar().showMessage(
+                tr("{name} is not available here.", name=tr(self._tools[key].name)), 3000)
+            return
         tool = self._tools[key]
         self.viewport.set_active_tool(tool)
         action = self._tool_actions.get(key)
@@ -1531,6 +2343,54 @@ class MainWindow(QMainWindow):
         self._tool_label.setText(tr("Tool: {name}", name=tr(tool.name)))
         self._refresh_vcb()
         self._update_status_hint()
+        # Select is where Repeat is pressed FROM, and the two tools entered
+        # from a right-click need the face or group that click was on.
+        if key not in ("select", "texture_position", "change_axes"):
+            self._remember_command(tool.name,
+                                   lambda k=key: self._activate_tool(k))
+
+    # ---- Repeat last command (Blender Shift+R, right-click ▸ Repeat) -------
+    def _remember_command(self, label: str, run) -> None:
+        self._last_command = (label, run)
+        act = getattr(self, "_repeat_action", None)
+        if act is not None:
+            act.setText(tr("Repeat {name}", name=tr(label)))
+            act.setEnabled(True)
+        self._refresh_repeat_hint()
+
+    def _refresh_repeat_hint(self) -> None:
+        """Say what Repeat would run, before it runs — with the keys it has
+        NOW: the shortcut editor (#138) may have moved or cleared them."""
+        lab = getattr(self, "_repeat_label", None)
+        if lab is None:
+            return
+        last = getattr(self, "_last_command", None)
+        show = (last is not None
+                and self.viewport.active_tool is self._tools["select"])
+        if show:
+            keys = self._repeat_action.shortcut().toString(
+                QKeySequence.NativeText)
+            text = (tr("{keys}: repeat {name}", keys=keys, name=tr(last[0]))
+                    if keys else tr("Repeat {name}", name=tr(last[0])))
+            if lab.text() != text:
+                lab.setText(text)
+        lab.setVisible(show)
+
+    def repeat_last_command(self) -> bool:
+        """Run again the last tool picked or one-shot command applied.
+
+        A tool comes back as if its key were pressed; a command runs on the
+        CURRENT selection — the point of it: reverse this face, select the
+        next, repeat."""
+        last = getattr(self, "_last_command", None)
+        if last is None:
+            self.viewport.flash_status(tr("Nothing to repeat yet"), 3000)
+            return False
+        label, run = last
+        run()
+        self.viewport.flash_status(tr("Repeat: {name}", name=tr(label)), 2000)
+        self.viewport.update()
+        return True
 
     def _activate_nav(self, key: str) -> None:
         self.viewport.set_nav_mode(key)
@@ -1542,8 +2402,9 @@ class MainWindow(QMainWindow):
         self._refresh_vcb()
         self._update_status_hint()
 
+    @_repeatable("Make Group")
     def _on_make_group(self) -> None:
-        """SketchUp's Make Group (G) over the selection.
+        """Make Group (G) over the selection.
 
         Every path here ANSWERS. A refusal whispered into the status bar for
         five seconds, or an empty selection that returns in silence, reads to
@@ -1573,7 +2434,7 @@ class MainWindow(QMainWindow):
         if groups:
             # A group can hold groups now (2026-09-11): the container adopts
             # them and the loose part of the selection becomes its own mesh,
-            # like SketchUp. What used to happen here was a dialog offering
+            # the classic behaviour. What used to happen here was a dialog offering
             # to merge or explode, because opening a container baked it.
             from core.history import MakeNestedGroupCommand
             self.viewport.history.execute(
@@ -1592,8 +2453,9 @@ class MainWindow(QMainWindow):
         self.viewport.history.execute(MakeGroupCommand(faces, edges))
         self.viewport.update()
 
+    @_repeatable("Make Component")
     def _on_make_component(self) -> None:
-        """SketchUp's Make Component (G): the selection becomes a shared
+        """Make Component (G): the selection becomes a shared
         DEFINITION placed as an instance — every copy shares it."""
         if self.viewport.scene.edit_group is not None:
             self.viewport.flash_status(tr(
@@ -1603,47 +2465,55 @@ class MainWindow(QMainWindow):
         sel = self.viewport.scene.selection
         faces = [f for f in sel if isinstance(f, Face)]
         edges = [e for e in sel if isinstance(e, Edge)]
-        classic = [g for g in sel if isinstance(g, Group)
-                   and getattr(g, "xform", None) is None
-                   and not getattr(g, "billboard", False)]
-        if not faces and not edges:
-            if classic:
-                # A selected GROUP converts in place — its mesh becomes the
-                # shared definition, free (no geometry copied). The old
-                # answer was "explode it first", which fed 230k faces
-                # through the loose mesh for minutes (piscina report).
-                from PySide6.QtWidgets import QInputDialog
-                from core.history import GroupToComponentCommand
-                name = None
-                if len(classic) == 1:
-                    name, ok = QInputDialog.getText(
-                        self, tr("Make Component"), tr("Component name:"),
-                        text=classic[0].name or tr("Component"))
-                    if not ok:
-                        return
-                    name = name.strip() or None
-                for g in classic:
-                    self.viewport.history.execute(
-                        GroupToComponentCommand(g, name))
-                self.viewport.update()
-                self.statusBar().showMessage(tr(
-                    "Component created — copies will share its definition"),
-                    4000)
+        groups = [g for g in sel if isinstance(g, Group)
+                  and not getattr(g, "billboard", False)]
+        count = sum(1 for g in self.viewport.scene.groups
+                    if g.is_component()) + 1
+        if len(groups) > 1 or (groups and (faces or edges)):
+            # Several groups, or groups and loose geometry: ONE component
+            # holding them, each still a group inside (Marco, 24-09, with
+            # issue #90) — it used to make one component per group, or
+            # refuse outright when loose geometry came along.
+            from core.history import MakeComponentOfCommand
+            name, ok = _prompts.get_text(
+                self, tr("Make Component"), tr("Component name:"),
+                text=tr("Component #{n}", n=count))
+            if not ok:
                 return
+            self.viewport.history.execute(MakeComponentOfCommand(
+                faces, edges, groups,
+                name=name.strip() or tr("Component #{n}", n=count)))
+            self.viewport.update()
+            self.statusBar().showMessage(tr(
+                "Component created — copies will share its definition"), 4000)
+            return
+        if groups:
+            # One group converts in place — its mesh becomes the shared
+            # definition, free (no geometry copied); a group of groups just
+            # becomes what it holds a matrix for. The old answer was
+            # "explode it first", which fed 230k faces through the loose
+            # mesh for minutes (piscina report).
+            g = groups[0]
+            if g.is_component():
+                self.viewport.flash_status(tr("It is a component already"))
+                return
+            from core.history import GroupToComponentCommand
+            name, ok = _prompts.get_text(
+                self, tr("Make Component"), tr("Component name:"),
+                text=g.name or tr("Component"))
+            if not ok:
+                return
+            self.viewport.history.execute(
+                GroupToComponentCommand(g, name.strip() or None))
+            self.viewport.update()
+            self.statusBar().showMessage(tr(
+                "Component created — copies will share its definition"), 4000)
+            return
+        if not faces and not edges:
             self.viewport.flash_status(
                 tr("Select the geometry for the component first"))
             return
-        if [g for g in sel if isinstance(g, Group)]:
-            # Loose geometry AND a group selected: the component would take
-            # the loose part only and quietly leave the group out.
-            self.viewport.flash_status(tr(
-                "Can't put a group inside a component yet — select only the "
-                "loose geometry, or only the group to convert it"), 5000)
-            return
-        from PySide6.QtWidgets import QInputDialog
-        count = sum(1 for g in self.viewport.scene.groups
-                    if getattr(g, "xform", None) is not None) + 1
-        name, ok = QInputDialog.getText(
+        name, ok = _prompts.get_text(
             self, tr("Make Component"), tr("Component name:"),
             text=tr("Component #{n}", n=count))
         if not ok:
@@ -1655,14 +2525,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr(
             "Component created — copies will share its definition"), 4000)
 
+    @_repeatable("Make Unique")
     def _on_make_unique(self) -> None:
         from core.history import MakeUniqueCommand
         for g in [g for g in self.viewport.scene.selection
-                  if isinstance(g, Group)
-                  and getattr(g, "xform", None) is not None]:
+                  if isinstance(g, Group) and g.is_component()]:
             self.viewport.history.execute(MakeUniqueCommand(g))
         self.viewport.update()
 
+    @_repeatable("Merge Groups")
     def _on_merge_groups(self) -> None:
         from core.history import MergeGroupsCommand
         groups = [e for e in self.viewport.scene.selection
@@ -1675,6 +2546,86 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("{n} groups merged into one", n=len(groups)), 3000)
 
+    def _on_change_axes(self, group) -> None:
+        """Right-click ▸ Change Axes: three clicks give the group or
+        component new local axes (tools/change_axes.py)."""
+        tool = self._tools["change_axes"]
+        tool.target = group
+        self._activate_tool("change_axes")
+        self.viewport.flash_status(tr("Click the new origin"), 4000)
+
+    def _fill_intersect_menu(self, menu) -> None:
+        from core.intersect import WITH_CONTEXT, WITH_MODEL, WITH_SELECTION
+        for mode, label, tip in (
+                (WITH_MODEL, tr("With Model"),
+                 tr("Add edges wherever the selected faces cross the rest "
+                    "of the model, groups included.")),
+                (WITH_SELECTION, tr("With Selection"),
+                 tr("Add edges where the selected faces cross one "
+                    "another.")),
+                (WITH_CONTEXT, tr("With Context"),
+                 tr("Add edges where the selected faces cross the rest of "
+                    "the group being edited, or of the model."))):
+            act = menu.addAction(
+                label, lambda m=mode: self._on_intersect_faces(m))
+            act.setStatusTip(tip)
+
+    @_repeatable("Intersect Faces")
+    def _on_intersect_faces(self, mode: str) -> None:
+        """Intersect Faces: edges wherever the selection's faces
+        cross the others (core/intersect.py), added to the context being
+        edited — they split its faces there — in one undo step."""
+        from core.edits import build_add_edges
+        from core.intersect import segments_for
+        scene = self.viewport.scene
+        if not scene.selection:
+            self.viewport.flash_status(tr("Select faces or groups first"))
+            return
+        segs = segments_for(scene, mode)
+        if not segs:
+            self.viewport.flash_status(tr("No faces cross the selection"))
+            return
+        self.viewport.history.execute(
+            build_add_edges(scene, segs, detect_faces=True))
+        self.viewport.flash_status(
+            tr("{n} intersection edges added", n=len(segs)), 3000)
+
+    @_repeatable("Split into Pieces")
+    def _on_split_into_pieces(self) -> None:
+        """Regroup the selected group's contents by physical piece — the
+        solids that do not touch (see :mod:`core.pieces`). The group stays
+        one object; Explode afterwards gives each piece on its own."""
+        from PySide6.QtWidgets import QApplication
+        from core.history import SplitIntoPiecesCommand
+        from core.pieces import split_into_pieces
+        scene = self.viewport.scene
+        if scene.edit_group is not None:
+            self.viewport.flash_status(tr(
+                "Leave the group first (Esc) to split it into pieces"))
+            return
+        groups = [g for g in scene.selection if isinstance(g, Group)
+                  and not getattr(g, "billboard", False)]
+        if len(groups) != 1:
+            self.viewport.flash_status(tr(
+                "Select one group or component to split into pieces"))
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            pieces = split_into_pieces(groups[0])
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not pieces:
+            self.viewport.flash_status(tr(
+                "Nothing to split: it is already in its pieces"))
+            return
+        self.viewport.history.execute(
+            SplitIntoPiecesCommand(groups[0], pieces))
+        self.viewport.flash_status(tr(
+            "Split into {n} pieces — Explode Group sets them free",
+            n=len(pieces)), 5000)
+        self.viewport.update()
+
+    @_repeatable("Explode Group")
     def _on_explode_group(self) -> None:
         if self.viewport.scene.edit_group is not None:
             self.viewport.flash_status(tr(
@@ -1687,6 +2638,43 @@ class MainWindow(QMainWindow):
         if groups:
             self.viewport.update()
 
+    def _on_simplify_mesh(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        from core.history import SimplifyMeshCommand
+
+        scene = self.viewport.scene
+        if not scene.mesh.faces:
+            if scene.groups:
+                self.viewport.flash_status(tr(
+                    "Explode the imported group first, then simplify the mesh"))
+            else:
+                self.viewport.flash_status(tr("There is no mesh to simplify"))
+            return
+
+        angle, ok = QInputDialog.getDouble(
+            self, tr("Simplify Mesh"),
+            tr("Maximum facet angle in degrees "
+               "(0 = coplanar only; higher values may change rounded geometry):"),
+            1.0, 0.0, 5.0, 2)
+        if not ok:
+            return
+
+        self.viewport.history.execute(SimplifyMeshCommand(angle))
+        error = self.viewport.history.last_error
+        if error:
+            QMessageBox.warning(self, tr("Simplify Mesh failed"), error)
+            return
+        command = self.viewport.history.undo_stack[-1]
+        removed = getattr(command, "faces_removed", 0)
+        if removed:
+            self.viewport.flash_status(
+                tr("Simplified mesh: removed {count} faces", count=removed),
+                5000)
+        else:
+            self.viewport.flash_status(tr("No faces could be simplified"))
+        self.viewport.update()
+
+    @_repeatable("Convert Path to Geometry")
     def _on_convert_geopath(self) -> None:
         """Bake selected georef paths into real mesh geometry (Track G bridge).
 
@@ -1715,7 +2703,7 @@ class MainWindow(QMainWindow):
         self.viewport.history.execute(cmd)
         self.viewport.update()
 
-    # ---- Sections (SketchUp section planes) ---------------------------------
+    # ---- Sections (section planes) -----------------------------------------
     def _set_section_visibility(self, attr: str, on: bool) -> None:
         setattr(self.viewport.scene, attr, bool(on))
         self.viewport.update()
@@ -1756,7 +2744,7 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def prompt_section_name(self, plane) -> None:
-        """SketchUp's post-placement prompt: name + symbol (cancel keeps
+        """The post-placement prompt: name + symbol (cancel keeps
         the defaults; the placement itself is already committed). «Don't
         ask again» keeps the defaults from then on — many users never name
         a section (issue #62, @pacaeiro); Preferences ▸ General turns the
@@ -1811,7 +2799,7 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def _on_align_view_to_section(self) -> None:
-        """SketchUp's Align View: look straight at the cut face."""
+        """Align View: look straight at the cut face."""
         import math as _math
         planes = self._selected_section_planes()
         plane = planes[0] if planes else self.viewport.scene.active_section()
@@ -1825,7 +2813,7 @@ class MainWindow(QMainWindow):
             cam.yaw = _math.atan2(n.y(), n.x())
         self.viewport.update()
 
-    # ---- Display styles (SketchUp Styles) -----------------------------------
+    # ---- Display styles ----------------------------------------------------
     def _apply_display_style(self, preset) -> None:
         """Activate a built-in style (a COPY — presets stay pristine)."""
         self.viewport.scene.display_style = preset.copy()
@@ -1833,6 +2821,24 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.statusBar().showMessage(
             tr("Style: {name}", name=tr(preset.name)), 2000)
+
+    def _toggle_xray(self) -> None:
+        """Alt+X: into X-ray, remembering the style you leave; out of it,
+        back to that style — or to Default when there is none to go back to
+        (X-ray picked from the menu, or another document since)."""
+        from core.style import style_by_name
+        scene = self.viewport.scene
+        style = getattr(scene, "display_style", None)
+        if style is not None and style.face_mode == "xray":
+            prev_scene, prev = self._style_before_xray
+            self._style_before_xray = (None, None)
+            if prev_scene is not scene or prev is None:
+                prev = style_by_name("Default")
+            self._apply_display_style(prev)
+        else:
+            self._style_before_xray = (
+                scene, style.copy() if style is not None else None)
+            self._apply_display_style(style_by_name("X-ray"))
 
     def _set_style_field(self, name: str, value: bool) -> None:
         style = getattr(self.viewport.scene, "display_style", None)
@@ -1850,6 +2856,8 @@ class MainWindow(QMainWindow):
             act.setChecked(name == style.name)
         for act, value in ((self._act_style_edges, style.edges),
                            (self._act_style_profiles, style.profiles),
+                           (getattr(self, "_act_style_back_edges", None),
+                            getattr(style, "back_edges", False)),
                            (getattr(self, "_act_section_fill", None),
                             getattr(style, "section_fill", True))):
             if act is None:      # menu still under construction
@@ -1873,8 +2881,9 @@ class MainWindow(QMainWindow):
         if panel is not None:
             panel.refresh()
 
+    @_repeatable("Delete Guides")
     def _on_delete_guides(self) -> None:
-        """Remove every construction guide (SketchUp's Edit ▸ Delete Guides)."""
+        """Remove every construction guide (Edit ▸ Delete Guides)."""
         from core.history import DeleteGuidesCommand
         guides = list(self.viewport.scene.guides)
         if guides:
@@ -1943,7 +2952,7 @@ class MainWindow(QMainWindow):
     def _on_toggle_eyedropper(self, on: bool) -> None:
         """Arm (or cancel) a one-shot material sample. Arming picks the Paint
         tool too, so the click that follows the sample paints with what was
-        just picked up — the SketchUp round trip in two clicks."""
+        just picked up — the classic round trip in two clicks."""
         PaintTool.sample_armed = bool(on)
         if on:
             self._activate_tool("paint")
@@ -1963,7 +2972,7 @@ class MainWindow(QMainWindow):
         self.viewport._apply_tool_cursor()
 
     def show_viewport_context_menu(self, global_pos, locked_image=None) -> None:
-        """SketchUp-style right-click menu, tailored to what's selected.
+        """Right-click menu, tailored to what's selected.
         ``locked_image``: a locked reference image under the cursor that the
         click did not select (geometry sat on top of it) — it gets its own
         Unlock / Delete entries, or it could never be reached again."""
@@ -1981,6 +2990,13 @@ class MainWindow(QMainWindow):
         sec_planes = [e for e in sel if isinstance(e, SectionPlane)]
         menu = QMenu(self)
 
+        # AutoCAD's first right-click entry: where a mouse-only hand looks.
+        last = getattr(self, "_last_command", None)
+        if last is not None:
+            menu.addAction(tr("Repeat {name}", name=tr(last[0])),
+                           self.repeat_last_command)
+            menu.addSeparator()
+
         if locked_image is not None and locked_image not in sel:
             name = getattr(locked_image, "name", "") or tr("image")
             menu.addAction(tr("Unlock image “{name}”", name=name),
@@ -1990,7 +3006,7 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         if sec_planes:
-            # SketchUp's section-plane context menu.
+            # The section-plane context menu.
             menu.addAction(tr("Reverse"), self._on_reverse_section)
             act_active = menu.addAction(tr("Active Cut"),
                                         self._on_toggle_active_section)
@@ -2038,20 +3054,31 @@ class MainWindow(QMainWindow):
         if has_mesh:
             menu.addAction(tr("Make Component…"), self._on_make_component)
         if any(isinstance(e, Face) for e in sel):
-            # SketchUp puts Reverse Faces in the face's own right-click menu,
+            # Reverse Faces goes in the face's own right-click menu,
             # which is where anyone looks for it. It lived only in the Edit
             # menu and Marco could not find it (2026-09-10).
             menu.addAction(tr("Reverse Faces"), self._on_reverse_faces)
+            menu.addAction(tr("Orient Faces"), self._on_orient_faces)
             face = self._single_textured_face()
             if face is not None:
-                # SketchUp's Texture submenu, on a face with an image.
+                # The Texture submenu, on a face with an image.
                 texm = menu.addMenu(tr("Texture"))
                 texm.addAction(tr("Position"), self._on_texture_position)
                 texm.addAction(tr("Reset Position"), self._on_texture_reset)
+        if has_mesh or has_group:
+            # Flip Along ▸ Red / Green / Blue: a mirror in place about the
+            # selection's centre in one click, the way modelling tutorials
+            # do it (issue #178, Esteban Penzo). The same mirror as the
+            # Flip tool's.
+            flip = menu.addMenu(tr("Flip Along"))
+            for label, axis in ((tr("Red axis"), "x"),
+                                (tr("Green axis"), "y"),
+                                (tr("Blue axis"), "z")):
+                flip.addAction(label, lambda a=axis: self._on_flip_along(a))
         loose_edges = [e for e in sel if isinstance(e, Edge)]
         if loose_edges and all(e in self.viewport.scene.mesh.edges
                                for e in loose_edges):
-            # SketchUp's Divide: a line or an arc into N equal pieces
+            # Divide: a line or an arc into N equal pieces
             # (issue #63, @pacaeiro: «It's a needed command»).
             menu.addAction(tr("Divide…"), self._on_divide)
         if self._hideable(sel):
@@ -2061,10 +3088,11 @@ class MainWindow(QMainWindow):
                for e in sel):
             menu.addAction(tr("Unhide"), self._on_unhide_selected)
         self._add_layer_submenu(menu, sel)
+        self._add_select_submenu(menu, sel)
         if has_group:
             groups = [e for e in sel if isinstance(e, Group)]
             if len(groups) == 1:
-                # SketchUp's Edit Group / Edit Component: the double-click
+                # Edit Group / Edit Component: the double-click
                 # by another road. (No parameters on the slot:
                 # ``triggered`` would hand its bool to one.)
                 one = groups[0]
@@ -2083,32 +3111,68 @@ class MainWindow(QMainWindow):
                     off = menu.addAction(
                         tr("Edit 3D Text… (letters edited by hand)"))
                     off.setEnabled(False)
-            if any(isinstance(e, Group) and getattr(e, "xform", None) is None
-                   and not getattr(e, "billboard", False) for e in sel):
+            if (any(isinstance(e, Group) and not e.is_component()
+                    and not getattr(e, "billboard", False) for e in sel)
+                    or sum(1 for e in sel if isinstance(e, Group)) >= 2):
                 # Convert a classic group into a component IN PLACE (free —
                 # no explode detour): the door the piscina hedge needed.
                 menu.addAction(tr("Make Component…"), self._on_make_component)
             menu.addAction(tr("Explode Group"), self._on_explode_group)
+            if sum(1 for e in sel if isinstance(e, Group)
+                   and not getattr(e, "billboard", False)) == 1:
+                menu.addAction(tr("Split into Pieces"),
+                               self._on_split_into_pieces)
             if sum(1 for e in sel if isinstance(e, Group)) >= 2:
                 # The fix-my-grouping path: fuse the selected groups into
                 # one WITHOUT routing their geometry through the loose mesh
                 # (explode + regroup chokes on leafy imports).
                 menu.addAction(tr("Merge Groups"), self._on_merge_groups)
-            if any(isinstance(e, Group)
-                   and getattr(e, "xform", None) is not None for e in sel):
+            if any(isinstance(e, Group) and e.is_component() for e in sel):
                 menu.addAction(tr("Make Unique"), self._on_make_unique)
+            if len(groups) == 1 and len(sel) == 1:
+                menu.addAction(tr("Change Axes"),
+                               lambda g=groups[0]: self._on_change_axes(g))
+            # The Solid Tools are offered on a selection of solids.
+            from core.solids import is_solid
+            solid = [e for e in sel if isinstance(e, Group) and is_solid(e)]
+            if len(solid) >= 2 and len(solid) == len(groups):
+                menu.addAction(tool_icon("outer_shell"), tr("Outer Shell"),
+                               lambda: self._activate_tool("outer_shell"))
+                sm = menu.addMenu(tr("Solid Tools"))
+                keys = ["solid_intersect", "solid_union"]
+                if len(solid) == 2:
+                    keys.append("solid_split")
+                for key in keys:
+                    sm.addAction(tool_icon(key), tr(self._tools[key].name),
+                                 lambda k=key: self._activate_tool(k))
+        if any(isinstance(e, Face) for e in sel) or has_group:
+            self._fill_intersect_menu(menu.addMenu(tr("Intersect Faces")))
         if has_mesh or has_group:
             menu.addAction(tr("Cut"), lambda: self.viewport.cut_selection())
             menu.addAction(tr("Copy"), lambda: self.viewport.copy_selection())
         if sel:
+            menu.addAction(tr("Zoom Selection"), self._on_zoom_selection)
             menu.addAction(tr("Delete"), self._on_delete_selection)
             act_clear = menu.addAction(tr("Clear selection"),
                                        self.viewport.scene.clear_selection)
             act_clear.triggered.connect(self.viewport.update)
             menu.addSeparator()
 
-        if getattr(self.viewport, "clipboard", None):
+        # Extensions' own entries (app.add_context_menu): after the
+        # selection's, before Paste and Undo. One that raises is logged and
+        # skipped — the menu always opens.
+        for fn in getattr(self, "_ext_context_menus", ()):
+            try:
+                fn(menu, list(sel))
+            except Exception:  # noqa: BLE001 — an extension's bug
+                import logging
+                logging.getLogger(__name__).exception(
+                    "extension context menu failed")
+
+        from formats import clip as clip_transfer
+        if getattr(self.viewport, "clipboard", None) or clip_transfer.available():
             menu.addAction(tr("Paste"), self._on_paste)
+            menu.addAction(tr("Paste in Place"), self._on_paste_in_place)
         menu.addAction(tr("Zoom Extents"), self._on_zoom_extents)
         menu.addSeparator()
         undo = menu.addAction(tr("Undo"), self._on_undo)
@@ -2120,7 +3184,7 @@ class MainWindow(QMainWindow):
 
     def _single_textured_face(self):
         """``(face, side)``: the one selected face with an image texture on
-        the side the right-click saw — SketchUp's Texture menu acts on the
+        the side the right-click saw — the Texture menu acts on the
         side you click; when only the other side carries an image, that
         one (Marco painted the underside of a slab from above, 2026-09-15).
         ``None`` otherwise."""
@@ -2176,10 +3240,49 @@ class MainWindow(QMainWindow):
             TexturePositionTool.side_command(face, side, flat))
         self.viewport.update()
 
+    def _add_select_submenu(self, menu, sel) -> None:
+        """Right-click ▸ Select: grow the selection by what it
+        touches or what it shares (issue #106, @pacaeiro). Each entry acts
+        in the current editing context only, like Select All."""
+        from core.select_ops import (all_connected, bounding_edges,
+                                     same_layer, same_material)
+        has_mesh = any(isinstance(e, (Edge, Face)) for e in sel)
+        has_face = any(isinstance(e, Face) for e in sel)
+        has_group = any(isinstance(e, Group) for e in sel)
+        if not (has_mesh or has_group):
+            return
+        scene = self.viewport.scene
+        from PySide6.QtWidgets import QMenu
+        sub = QMenu(tr("Select"), menu)
+        menu.addMenu(sub)
+
+        def grow(fn):
+            def run(_checked=False):
+                found = fn(list(scene.selection))
+                scene.select(found)
+                self.viewport.notify_scene_changed()
+                self.viewport.update()
+                self.statusBar().showMessage(
+                    tr("{n} entities selected", n=len(scene.selection)), 2500)
+            return run
+
+        if has_mesh:
+            sub.addAction(tr("All Connected")).triggered.connect(
+                grow(all_connected))
+        if has_face:
+            sub.addAction(tr("Bounding Edges")).triggered.connect(
+                grow(bounding_edges))
+        if has_face or any(getattr(e, "material", None) for e in sel
+                           if isinstance(e, Group)):
+            sub.addAction(tr("All with Same Material")).triggered.connect(
+                grow(lambda s: same_material(scene, s)))
+        sub.addAction(tr("All on Same Layer")).triggered.connect(
+            grow(lambda s: same_layer(scene, s)))
+
     def _add_layer_submenu(self, menu, sel) -> None:
         """Right-click ▸ Layer ▸ the document's layers, the selection's own
-        one ticked, plus «New layer…». Not SketchUp's (its road is Entity
-        Info), but it is where Rafael looked — «botón derecho… no lo veo
+        one ticked, plus «New layer…». Not the usual place (that road is
+        Entity Info), but it is where Rafael looked — «botón derecho… no lo veo
         tampoco» (2026-09-16, 39:30) — and it costs nothing to be there."""
         from core.dimension import Dimension
         from core.layers import layer_of
@@ -2229,7 +3332,7 @@ class MainWindow(QMainWindow):
         n = 1
         while scene.layer(f"{base} {n}") is not None:
             n += 1
-        name, ok = QInputDialog.getText(
+        name, ok = _prompts.get_text(
             self, tr("New layer"), tr("Layer name:"), text=f"{base} {n}")
         name = (name or "").strip()
         if ok and name:
@@ -2244,8 +3347,9 @@ class MainWindow(QMainWindow):
         return [e for e in entities
                 if isinstance(e, (Edge, Face, Group)) and not _is_hidden(e)]
 
+    @_repeatable("Hide")
     def _on_hide(self) -> None:
-        """SketchUp's Edit ▸ Hide: the selected objects (groups,
+        """Edit ▸ Hide: the selected objects (groups,
         components), faces and edges stop drawing, picking and exporting —
         they are still in the document and come back with Unhide, with
         View ▸ Hidden Objects / Geometry, or with a scene that remembers
@@ -2267,7 +3371,7 @@ class MainWindow(QMainWindow):
                objects=n_obj, faces=n_face, edges=n_edge), 4000)
 
     def _on_unhide_selected(self) -> None:
-        """SketchUp's Edit ▸ Unhide ▸ Selected — reachable once View ▸
+        """Edit ▸ Unhide ▸ Selected — reachable once View ▸
         Hidden Objects / Geometry lets hidden things be selected."""
         from core.history import HideCommand, _is_hidden
         targets = [e for e in self.viewport.scene.selection
@@ -2283,7 +3387,7 @@ class MainWindow(QMainWindow):
             tr("Unhid {n} entities.", n=len(targets)), 3000)
 
     def _on_unhide_last(self) -> None:
-        """SketchUp's Edit ▸ Unhide ▸ Last: the most recent Hide whose
+        """Edit ▸ Unhide ▸ Last: the most recent Hide whose
         entities are still hidden comes back, as its own undoable step."""
         from core.history import HideCommand
         for cmd in reversed(self.viewport.history.undo_stack):
@@ -2312,7 +3416,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _on_unhide_all(self) -> None:
-        """SketchUp's Edit ▸ Unhide ▸ All."""
+        """Edit ▸ Unhide ▸ All."""
         from core.history import HideCommand
         targets = self._hidden_everywhere()
         if not targets:
@@ -2340,6 +3444,7 @@ class MainWindow(QMainWindow):
             panel.refresh()
         self.viewport.update()
 
+    @_repeatable("Divide")
     def _on_divide(self) -> None:
         """Divide the selected edges / curves into N equal pieces (#63)."""
         from PySide6.QtWidgets import QInputDialog
@@ -2363,8 +3468,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("Divided into {n} segments", n=n), 3000)
 
+    def _on_flip_along(self, axis: str) -> None:
+        """Right-click ▸ Flip Along ▸ Red / Green / Blue (issue #178)."""
+        from tools.flip import FlipTool
+        FlipTool().flip(self.viewport, axis)
+
+    @_repeatable("Reverse Faces")
     def _on_reverse_faces(self) -> None:
-        """SketchUp's Reverse Faces: flip the winding (and thus the front/back
+        """Reverse Faces: flip the winding (and thus the front/back
         sides) of the selected faces."""
         from core.history import FlipFacesCommand
         from core.mesh import Face as MeshFace
@@ -2379,6 +3490,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("Reversed {n} face(s).", n=len(faces)), 3000)
 
+    @_repeatable("Orient Faces")
+    def _on_orient_faces(self) -> None:
+        """Orient Faces (issue #77): every face connected to the
+        chosen one turns to wind like it — its front side is the one the
+        rest take."""
+        from core.history import FlipFacesCommand
+        from core.mesh import Face as MeshFace
+        from core.orient_faces import faces_to_flip
+        faces = [e for e in self.viewport.scene.selection
+                 if isinstance(e, MeshFace)]
+        if len(faces) != 1:
+            self.statusBar().showMessage(
+                tr("Select the one face the others should match."), 3000)
+            return
+        flip = faces_to_flip(faces[0])
+        if flip:
+            self.viewport.history.execute(FlipFacesCommand(flip))
+            self.viewport.update()
+        self.statusBar().showMessage(
+            tr("Oriented {n} face(s) like the selected one.", n=len(flip))
+            if flip else tr("The connected faces already match."), 3000)
+
+    @_repeatable("Heal Overlapping Faces")
     def _on_heal_overlaps(self) -> None:
         cmd = HealOverlapsCommand()
         self.viewport.history.execute(cmd)
@@ -2387,7 +3521,29 @@ class MainWindow(QMainWindow):
             tr("Healed {n} overlapping face(s).", n=cmd.healed) if cmd.healed
             else tr("No overlapping faces found."), 3000)
 
+    @_repeatable("Rebuild Faces (Planar)")
     def _on_rebuild_planar(self) -> None:
+        # With faces selected, rebuild just THEIR plane — the per-plane
+        # rebuild every stroke already runs — so a 3D model keeps the tool
+        # (issue #73, @pacaeiro). Nothing selected: the whole flat drawing,
+        # as before.
+        from core.mesh import Face as MeshFace
+        picked = [e for e in self.viewport.scene.selection
+                  if isinstance(e, MeshFace)]
+        if picked:
+            plane = self._common_plane(picked)
+            if plane is None:
+                self.statusBar().showMessage(tr(
+                    "The selected faces must lie on one plane."), 3000)
+                return
+            from core.history import RebuildPlaneFacesCommand
+            cmd = RebuildPlaneFacesCommand(*plane)
+            self.viewport.history.execute(cmd)
+            self.viewport.update()
+            self.statusBar().showMessage(tr(
+                "Rebuilt {n} face(s) on the selected plane.", n=cmd.rebuilt),
+                3000)
+            return
         cmd = RebuildPlanarFacesCommand()
         self.viewport.history.execute(cmd)
         self.viewport.update()
@@ -2397,7 +3553,49 @@ class MainWindow(QMainWindow):
             msg = tr("Rebuilt {n} face(s) from the edge graph.", n=cmd.rebuilt)
         self.statusBar().showMessage(msg, 3000)
 
+    @staticmethod
+    def _common_plane(faces):
+        """(origin, unit normal) of the plane every face lies on, or None."""
+        from PySide6.QtGui import QVector3D
+        n = faces[0].normal()
+        length = n.length()
+        if length < 1e-9:
+            return None
+        n = n / length
+        o = QVector3D(faces[0].loop[0].position)
+        tol = 1e-4                  # RebuildPlaneFacesCommand's own
+        for f in faces:
+            for loop in [f.loop, *f.hole_loops]:
+                for v in loop:
+                    if abs(QVector3D.dotProduct(v.position - o, n)) > tol:
+                        return None
+        return o, n
+
+    def _sync_foreign_clipboard(self) -> None:
+        # A copy made in ANOTHER IngeTrazo window wins over this window's
+        # older one, as a system clipboard does (issue #76).
+        from formats import clip as clip_transfer
+        try:
+            other = clip_transfer.foreign()
+        except Exception:  # noqa: BLE001 - a bad clipboard must not break Paste
+            other = None
+        if other is not None:
+            old = self.viewport.clipboard
+            drop = getattr(self.viewport, "_drop_clip_protos", None)
+            if old and callable(drop):
+                drop(old)
+            self.viewport.clipboard = other
+
+    def _on_paste_in_place(self) -> None:
+        """Edit ▸ Paste in Place: the copy lands where the
+        original was, in whatever context is open — the way to move things
+        into and out of groups without shifting them."""
+        self._sync_foreign_clipboard()
+        if PasteTool.in_place(self.viewport):
+            self.statusBar().showMessage(tr("Pasted in place."), 3000)
+
     def _on_paste(self) -> None:
+        self._sync_foreign_clipboard()
         if self.viewport.clipboard is None:
             return
         self.viewport.set_active_tool(PasteTool())
@@ -2418,6 +3616,20 @@ class MainWindow(QMainWindow):
     # ---- View navigation ----------------------------------------------------
     def _on_zoom_extents(self) -> None:
         bounds = self.viewport.scene.bounds()
+        # Face-me figures count too, as a Zoom Extents should:
+        # ``Scene.bounds()`` leaves them out (they draw per frame), so a new
+        # document — the scale figure alone — framed nothing, and Zoom
+        # Extents did nothing after zooming far away (Marco, 23-09).
+        figs = self._figure_bounds()
+        if figs is not None:
+            lo, hi = figs
+            if bounds[0] is not None:
+                from PySide6.QtGui import QVector3D
+                lo = QVector3D(min(lo.x(), bounds[0].x()), min(lo.y(), bounds[0].y()),
+                               min(lo.z(), bounds[0].z()))
+                hi = QVector3D(max(hi.x(), bounds[1].x()), max(hi.y(), bounds[1].y()),
+                               max(hi.z(), bounds[1].z()))
+            bounds = (lo, hi)
         if bounds[0] is None:
             # ``Scene.bounds()`` covers editable geometry only. A document
             # holding just a survey (the normal state right after importing
@@ -2428,8 +3640,36 @@ class MainWindow(QMainWindow):
             bounds = survey.bounds()
             if bounds[0] is None:
                 return
-        self.viewport.camera.fit_to(bounds[0], bounds[1])
+        self.viewport.camera.fit_box(bounds[0], bounds[1])
         self.viewport.update()
+
+    def _on_zoom_selection(self) -> None:
+        """Zoom Extents over the selection. Nothing selected: nothing."""
+        lo, hi = self.viewport.scene.selection_bounds()
+        if lo is None:
+            self.statusBar().showMessage(tr("Nothing selected"), 2500)
+            return
+        self.viewport.camera.fit_box(lo, hi)
+        self.viewport.update()
+
+    def _figure_bounds(self):
+        """World box of the visible face-me figures, or None."""
+        from PySide6.QtGui import QVector3D
+        from core.group import placement_points
+        scene = self.viewport.scene
+        lo = hi = None
+        for g in scene.groups:
+            if not getattr(g, "billboard", False) or not scene.entity_visible(g):
+                continue
+            pts = placement_points(g)
+            if not len(pts):
+                continue
+            a, b = pts.min(axis=0), pts.max(axis=0)
+            lo = a if lo is None else [min(x, y) for x, y in zip(lo, a)]
+            hi = b if hi is None else [max(x, y) for x, y in zip(hi, b)]
+        if lo is None:
+            return None
+        return QVector3D(*map(float, lo)), QVector3D(*map(float, hi))
 
     def _ensure_composer(self):
         """The composer window, created but not shown — the sheet strip's
@@ -2452,13 +3692,47 @@ class MainWindow(QMainWindow):
 
     # ---- Model / sheet tabs (the strip at the bottom) -----------------------
     def _refresh_sheet_tabs(self) -> None:
-        """This window shows the model, so its strip always marks «Model»;
-        the sheet names come from the document."""
+        """This window shows the model, so its strip always marks «Model».
+        Beside it, ONE sheet: the last one opened — the model window only
+        goes model ↔ sheet, and all the sheets are tabs in the composer
+        (Marco, 23-09: «en el modelo solo alternar entre el modelo y la
+        lámina… cuando regrese a lámina, que regrese a la lámina 2»). A
+        document without sheets offers «+» instead."""
         tabs = getattr(self, "_sheet_tabs", None)
         if tabs is None:
             return
         comps = getattr(self.viewport.scene, "compositions", None) or []
-        tabs.refresh([c.name for c in comps], None)
+        if not comps:
+            self._strip_sheets = []
+            tabs.set_show_new(True)
+            tabs.refresh([], None)
+            return
+        comp = getattr(getattr(self, "_composer", None), "comp", None)
+        if comp is not None and comp in comps:
+            last = comps.index(comp)
+        else:
+            last = min(max(getattr(self, "_last_sheet", 0), 0), len(comps) - 1)
+        self._last_sheet = last
+        self._strip_sheets = [last]
+        tabs.set_show_new(False)
+        tabs.refresh([comps[last].name], None)
+
+    def _to_sheets(self) -> None:
+        comps = getattr(self.viewport.scene, "compositions", None) or []
+        if not comps:
+            self._show_new_sheet()
+            return
+        last = min(max(getattr(self, "_last_sheet", 0), 0), len(comps) - 1)
+        self._show_sheet(last)
+
+    def _show_strip_sheet(self, k: int) -> None:
+        """A sheet tab of THIS strip (it shows only the last sheet)."""
+        sheets = getattr(self, "_strip_sheets", None) or []
+        self._show_sheet(sheets[k] if 0 <= k < len(sheets) else k)
+
+    def _strip_sheet_menu(self, k: int, pos) -> None:
+        sheets = getattr(self, "_strip_sheets", None) or []
+        self._sheet_tab_menu(sheets[k] if 0 <= k < len(sheets) else k, pos)
 
     def _show_model(self) -> None:
         self.show()
@@ -2469,6 +3743,7 @@ class MainWindow(QMainWindow):
     def _show_sheet(self, index: int) -> None:
         """A sheet tab: the composer opens on that sheet. This window keeps
         showing the model, so its own strip snaps back to «Model»."""
+        self._last_sheet = index
         self._on_open_composer()
         self._composer.show_sheet(index)
         self._refresh_sheet_tabs()
@@ -2658,8 +3933,24 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("Selected everything ({n} entities)", n=len(sel)), 2500)
 
+    def _on_invert_selection(self) -> None:
+        """Select what is not selected, drop what is (Ctrl+Shift+I) — see
+        ``Scene.invert_selection`` for what counts."""
+        n = self.viewport.scene.invert_selection()
+        self.viewport.notify_scene_changed()
+        self.statusBar().showMessage(
+            tr("Selection inverted ({n} entities)", n=n), 2500)
+
     # ---- Undo / redo --------------------------------------------------------
     def _on_undo(self) -> None:
+        # A tool in the middle of something answers Ctrl+Z first: the Line
+        # steps its chain back one vertex instead of staying anchored to
+        # the end of the segment just undone (#175).
+        tool = self.viewport.active_tool
+        handler = getattr(tool, "on_undo", None)
+        if callable(handler) and handler(self.viewport):
+            self.viewport.notify_scene_changed()
+            return
         if self.viewport.history.undo():
             self.viewport.notify_scene_changed()
 
@@ -2669,11 +3960,12 @@ class MainWindow(QMainWindow):
 
     # ---- File handling ------------------------------------------------------
     # ---- The document's camera (issue #60) ---------------------------------
-    _CAMERA_FIELDS = ("distance", "yaw", "pitch", "fov_deg", "perspective")
+    _CAMERA_FIELDS = ("distance", "yaw", "pitch", "fov_deg", "perspective",
+                      "two_point")
 
     def _camera_dict(self) -> dict:
-        """The live camera as the document keeps it (SketchUp saves the
-        camera in the file; @pacaeiro, issue #60)."""
+        """The live camera as the document keeps it (the .skp format
+        saves the camera in the file too; @pacaeiro, issue #60)."""
         cam = self.viewport.camera
         t = cam.target
         out = {"target": [float(t.x()), float(t.y()), float(t.z())]}
@@ -2684,7 +3976,10 @@ class MainWindow(QMainWindow):
     def _apply_camera_home(self) -> None:
         """Look at what the document's author was looking at; a document
         from before the camera was saved keeps the view as it is."""
-        home = getattr(self.viewport.scene, "camera_home", None)
+        self._apply_camera_dict(getattr(self.viewport.scene, "camera_home", None))
+
+    def _apply_camera_dict(self, home) -> None:
+        """Put the camera where :meth:`_camera_dict` found it."""
         if not isinstance(home, dict):
             return
         cam = self.viewport.camera
@@ -2711,7 +4006,112 @@ class MainWindow(QMainWindow):
             setattr(cam, k, getattr(fresh, k))
         self.viewport.update()
 
+    @staticmethod
+    def _new_window_command() -> list[str]:
+        """How to start another IngeTrazo from this one. Each package needs
+        its own way: the AppImage's mount and the Flatpak sandbox both go
+        away with the process that owns them, so the new window must get
+        its own rather than run from ours."""
+        import os
+        import sys
+        from core.paths import app_root, is_frozen
+        flag = "--new-window"        # skip the single-instance handover
+        if os.environ.get("APPIMAGE"):
+            return [os.environ["APPIMAGE"], flag]
+        if os.environ.get("FLATPAK_ID"):
+            return ["flatpak-spawn", "ingetrazo", flag]
+        if is_frozen():
+            return [sys.executable, flag]
+        return [sys.executable, str(app_root() / "main.py"), flag]
+
+    # ---- Extension workspaces (ExtensionApp.enter_workspace) ----------------
+    def enter_workspace(self, workspace) -> bool:
+        """Show an extension's own document instead of the model — a CAM
+        job's drawing on its stock, say (docs/plugins.md, «Workspaces»).
+
+        The model is PARKED, not closed: its scene, undo history, camera,
+        file and saved state wait untouched until :meth:`leave_workspace`.
+        Meanwhile File ▸ New / Open / Save / Save As, the title, the
+        unsaved-changes prompts and quitting go to ``workspace``, the
+        model's autosave pauses, and only the tools in
+        ``workspace.allowed_tools`` (None = all) can be picked.
+
+        ``workspace`` provides ``scene``, ``history``, ``title()``,
+        ``is_dirty()``, ``save()``, ``save_as()`` and ``confirm_leave()``
+        (True when it may go: saved, discarded, or nothing to lose);
+        optionally ``new()``, ``open()``, ``allowed_tools``, ``camera``
+        (a :meth:`_camera_dict`) and ``left()``, called once it is gone.
+        Returns False when a workspace is already shown."""
+        if self._workspace is not None:
+            return False
+        self._activate_tool("select")
+        vp = self.viewport
+        vp.end_group_edit()
+        self._parked = {
+            "clean": not self._is_dirty(),
+            "path": self._current_path,
+            "import_name": self._import_name,
+            "camera": self._camera_dict(),
+        }
+        self._parked["scene"], self._parked["history"] = vp.set_document(
+            workspace.scene, workspace.history)
+        self._workspace = workspace
+        self.set_tool_filter(getattr(workspace, "allowed_tools", None))
+        self._apply_camera_dict(getattr(workspace, "camera", None))
+        if getattr(self, "_sheet_tabs", None) is not None:
+            self._sheet_tabs.setVisible(False)   # sheets belong to the model
+        self._update_title()
+        return True
+
+    def leave_workspace(self) -> bool:
+        """Back to the parked model; False when the workspace would not go
+        (its user cancelled the unsaved-changes prompt)."""
+        ws = self._workspace
+        if ws is None:
+            return True
+        if not ws.confirm_leave():
+            return False
+        self._activate_tool("select")
+        p = self._parked
+        if hasattr(ws, "camera"):
+            ws.camera = self._camera_dict()
+        self.viewport.set_document(p["scene"], p["history"])
+        self._workspace, self._parked = None, None
+        self.set_tool_filter(None)
+        self._current_path = p["path"]
+        self._import_name = p["import_name"]
+        # set_document moved the version on: a model that was saved stays so.
+        self._saved_version = self.viewport.scene.version if p["clean"] else -1
+        self._apply_camera_dict(p["camera"])
+        if getattr(self, "_sheet_tabs", None) is not None:
+            self._sheet_tabs.setVisible(True)
+        self._update_title()
+        if hasattr(ws, "left"):
+            ws.left()
+        return True
+
+    def workspace(self):
+        """The extension workspace shown instead of the model, or None."""
+        return self._workspace
+
+    def set_tool_filter(self, allowed) -> None:
+        """Only the tools keyed in ``allowed`` can be picked (toolbar,
+        menus, shortcuts); None allows every tool again."""
+        self._tool_filter = set(allowed) if allowed is not None else None
+        for key, action in self._tool_actions.items():
+            action.setEnabled(self._tool_filter is None or key in self._tool_filter)
+
+    def _on_new_window(self) -> None:
+        from PySide6.QtCore import QProcess
+        cmd = self._new_window_command()
+        if not QProcess.startDetached(cmd[0], cmd[1:]):
+            QMessageBox.warning(self, tr("New Window"),
+                                tr("Could not start another IngeTrazo window."))
+
     def _on_new(self) -> None:
+        if self._workspace is not None and hasattr(self._workspace, "new"):
+            self._workspace.new()
+            return
         self.viewport.end_group_edit()
         if not self._confirm_discard(tr("Discard current drawing?")):
             return
@@ -2728,12 +4128,20 @@ class MainWindow(QMainWindow):
         self.viewport.reset_texture_cache()
         self._current_path = None
         self._import_name = None
+        self._apply_new_document_units()
         self._insert_scale_figure()
         self.viewport.notify_scene_changed()
         self._sync_style_menu()
         self._sync_section_menu()
         self._update_title()
         self.settle_heap()
+
+    def _apply_new_document_units(self) -> None:
+        """A new, empty document starts in the units chosen for new documents
+        in Preferences (#121). Not a change to the document: no version bump,
+        so it does not ask to be saved."""
+        from core import units as _units
+        _units.apply_units(self.viewport.scene, _units.new_document_units())
 
     def _on_recover_discarded(self) -> None:
         """Open one of the retired auto-save copies as a NEW, unsaved
@@ -2811,6 +4219,9 @@ class MainWindow(QMainWindow):
         self.open_path(path)
 
     def _on_open(self) -> None:
+        if self._workspace is not None and hasattr(self._workspace, "open"):
+            self._workspace.open()
+            return
         self.viewport.end_group_edit()
         if not self._confirm_discard(
                 tr("Discard current drawing and open another?")):
@@ -2831,8 +4242,16 @@ class MainWindow(QMainWindow):
 
         ``.igz`` is our native format; ``.dae``/``.skp`` are the interchange
         formats we also register in the desktop entry, so double-clicking one
-        imports it rather than failing to parse it as an IngeTrazo document."""
+        imports it rather than failing to parse it as an IngeTrazo document.
+        An extension may claim a suffix of its own
+        (``ExtensionApp.add_file_opener``); anything else needs the model,
+        so a workspace in front of it is left first."""
         suffix = path.suffix.lower()
+        opener = self.file_openers.get(suffix)
+        if opener is not None:
+            return bool(opener(path))
+        if self._workspace is not None and not self.leave_workspace():
+            return False
         if suffix == ".dae":
             self._import_dae_path(path)
             return True
@@ -2904,6 +4323,20 @@ class MainWindow(QMainWindow):
         # shows stale defaults over a scene that has its own.
         self.georef_tray.base_map.sync_from_document()
         self.georef_tray.base_map.sync_photo_mesh()
+        repaired = getattr(self.viewport.scene, "load_repairs", 0)
+        if repaired:
+            # Pieces with a coordinate that is not a number (NaN / inf) were
+            # left out rather than refuse the whole document (#185). Keep it
+            # unsaved, so Ctrl+S writes the cleaned file, and say so.
+            self._saved_version = -1
+            box = QMessageBox(
+                QMessageBox.Warning, tr("Document repaired"),
+                tr("{n} damaged pieces (a coordinate that is not a number) "
+                   "were left out so the rest of “{name}” could open. Save "
+                   "it to keep the repaired document.",
+                   n=repaired, name=path.name), QMessageBox.Ok, self)
+            box.setAttribute(Qt.WA_DeleteOnClose)
+            box.open()                       # not modal to the event loop
         self.viewport.notify_scene_changed()
         self._update_title()
         self.settle_heap()
@@ -2928,6 +4361,10 @@ class MainWindow(QMainWindow):
         gc.collect()
 
     def _on_save(self) -> None:
+        if self._workspace is not None:
+            self._workspace.save()
+            self._update_title()
+            return
         self.viewport.end_group_edit()
         if self._current_path is None:
             self._on_save_as()
@@ -2935,6 +4372,10 @@ class MainWindow(QMainWindow):
         self._do_save(self._current_path)
 
     def _on_save_as(self) -> None:
+        if self._workspace is not None:
+            self._workspace.save_as()
+            self._update_title()
+            return
         self.viewport.end_group_edit()
         default_name = (
             self._current_path.name if self._current_path is not None else "untitled.igz"
@@ -2996,17 +4437,26 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _insert_scale_figure(self) -> None:
-        """Place the scale figure in a fresh document, SketchUp-style: OFF
+        """Place the scale figure in a fresh document, the classic way: OFF
         to the left of the origin, so the origin stays visible as the
-        drawing reference (user request — SketchUp does the same). 1.72 m
+        drawing reference (user request). 1.70 m
         tall. A plain group — select and Delete removes it. Added outside
-        the undo history and without dirtying the document."""
-        # SketchUp's placement, measured by the user: 60-70 cm to the left
+        the undo history and without dirtying the document. Left out when
+        Preferences say so (#221: parts for a 3D printer start on an empty
+        sheet)."""
+        from PySide6.QtCore import QSettings
+        if str(QSettings().value("new_document/scale_figure", "1")) == "0":
+            # Still a clean new document: nothing to ask about on close.
+            self._saved_version = self.viewport.scene.version
+            return
+        # The classic placement, measured by the user: 60-70 cm to the left
         # and 60 cm forward (toward the viewer) of the origin.
         from PySide6.QtGui import QVector3D
         at = QVector3D(-0.65, -0.60, 0.0)
-        group = self._make_billboard_person("sumari.png", height=1.72,
-                                            name="Sumari", position=at)
+        # The engineer since 26-09 (Marco: «el personaje Sumari no me gusta
+        # mucho, ¿ponemos el del ingeniero?»); Sumari stays in the library.
+        group = self._make_billboard_person("ingeniero.png", height=1.70,
+                                            name=tr("Engineer"), position=at)
         if group is None:
             group = self._make_billboard_person(position=at)
         if group is None:
@@ -3110,13 +4560,18 @@ class MainWindow(QMainWindow):
         elif obj_path.exists():
             from formats import obj as _obj
             _obj.load_obj(temp, obj_path)
+            parts = _obj_parts(temp)
+            if parts is not None:
+                parts.name = name or tr(key.capitalize())
+                self._start_place(parts)
+                return
             mesh = temp.mesh
             if not mesh.faces and temp.groups:
                 # Big OBJs land as a reference group (formats/obj.py), not
                 # in the loose mesh — take that mesh or we'd insert nothing.
                 mesh = temp.groups[0].mesh
             # Low-poly components read as REAL models when facet seams are
-            # soft (SketchUp import smoothing).
+            # soft (the usual import smoothing).
             from formats.fuse import soften_smooth_edges
             soften_smooth_edges(mesh, cos_threshold=0.55)
         else:
@@ -3159,6 +4614,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, tr("Component library"), str(exc))
             return
+        parts = _obj_parts(temp)
+        if parts is not None:
+            # A model written as parts keeps them: one component to place,
+            # its pieces inside (see formats.obj._pieces_group).
+            parts.name = entry.get("nombre", "") or parts.name
+            self._start_place(parts)
+            return
         mesh = temp.mesh
         if not mesh.faces and temp.groups:
             mesh = temp.groups[0].mesh       # a big OBJ lands as a group
@@ -3175,7 +4637,7 @@ class MainWindow(QMainWindow):
         LibraryDialog(self).exec()
 
     def _text3d_dialog(self, params=None):
-        """SketchUp's 3D Text dialog (text, font, bold, italic, height,
+        """The 3D Text dialog (text, font, bold, italic, height,
         thickness) → the parameters dict, or ``None`` when cancelled or
         blank. ``params`` pre-fills it (editing an existing text).
 
@@ -3236,8 +4698,9 @@ class MainWindow(QMainWindow):
             italic_check.isChecked(), height_spin.value(),
             depth_spin.value())
 
+    @_repeatable("3D Text")
     def _on_insert_3d_text(self) -> None:
-        """SketchUp's 3D Text: the dialog generates REAL extruded geometry —
+        """3D Text: the dialog generates REAL extruded geometry —
         a container group with ONE GROUP PER LETTER, editable later from
         the right-click menu — handed to the placement tool so it settles
         on the ground (or onto a wall) like any component."""
@@ -3273,7 +4736,7 @@ class MainWindow(QMainWindow):
     def _on_edit_3d_text(self, group=None) -> None:
         """Reopen the 3D Text dialog on an existing text and lay the letters
         out again in place — the right-click's «Edit 3D Text…» (Rafael,
-        2026-09-16: «SketchUp tampoco»; double-click keeps SketchUp's
+        2026-09-16: «... tampoco»; double-click keeps its usual
         meaning and enters the group). Letters pushed or painted by hand
         are regenerated."""
         from core.history import EditText3DCommand
@@ -3323,12 +4786,6 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, tr("Get more models and textures"),
             tr("Free sources that open directly in IngeTrazo:") + "<br><br>"
-            "<b>3D Warehouse</b> — "
-            "<a href='https://3dwarehouse.sketchup.com'>"
-            "3dwarehouse.sketchup.com</a><br>"
-            + tr("Download as COLLADA (.dae) — or the .skp itself — and use "
-                 "File → Import.")
-            + "<br><br>"
             "<b>Poly Haven</b> — <a href='https://polyhaven.com'>"
             "polyhaven.com</a> " + tr("(CC0: models OBJ and PBR textures)")
             + "<br><b>ambientCG</b> — <a href='https://ambientcg.com'>"
@@ -3340,9 +4797,20 @@ class MainWindow(QMainWindow):
 
     def _import_progress(self, title):
         """A modal progress dialog + the callback the loaders call at
-        milestones (big imports take ~20 s; SketchUp shows a bar here too)."""
+        milestones (big imports take ~20 s; a bar is the usual answer)."""
         from PySide6.QtWidgets import QApplication, QProgressDialog
+        # Closed is not deleted: each open or import left its dialog behind
+        # as a child of the window for the whole session (the release check,
+        # 25-09). The previous one is surely done by the time a new one is
+        # asked for, so it goes now — never more than one alive.
+        old = getattr(self, "_progress_dlg", None)
+        if old is not None:
+            try:
+                old.deleteLater()
+            except RuntimeError:
+                pass
         dlg = QProgressDialog(title, "", 0, 100, self)
+        self._progress_dlg = dlg
         dlg.setCancelButton(None)
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(400)
@@ -3359,7 +4827,7 @@ class MainWindow(QMainWindow):
         """Parse ``skp`` off the UI thread, keeping the event loop responsive.
 
         Returns ``(payload, exc)`` — ``payload`` is the parsed geometry (or
-        ``None``), ``exc`` is a ``NeedsConverter`` (fall back to skp2dae), any
+        ``None``), ``exc`` is a ``NeedsConverter`` (the reader cannot read it), any
         other exception (real failure), or ``None``. The parse touches no
         ``Scene`` so it is safe off-thread; ``apply_payload`` runs on the UI
         thread in the caller. A local ``QEventLoop`` blocks here until the
@@ -3413,6 +4881,51 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
         relay.deleteLater()
         return result.get("payload"), result.get("exc")
+
+    def _parse_stl_threaded(self, path, scale, simplify_mode, cb):
+        """Parse an STL on a worker while delivering progress on the UI thread."""
+        from PySide6.QtCore import QEventLoop, QObject, QThread, Qt, Signal
+        from formats import stl as stl_format
+
+        class _Worker(QObject):
+            progressed = Signal(float, str)
+            finished = Signal(object, object)
+
+            def run(self):
+                try:
+                    mesh = stl_format.parse_stl(
+                        path, progress=lambda f, t: self.progressed.emit(f, t),
+                        scale=scale, simplify_mode=simplify_mode)
+                    self.finished.emit(mesh, None)
+                except Exception as exc:  # noqa: BLE001 — reported to caller
+                    self.finished.emit(None, exc)
+
+        thread = QThread(self)
+        worker = _Worker()
+        worker.moveToThread(thread)
+        result = {}
+        loop = QEventLoop()
+
+        class _Relay(QObject):
+            def on_progress(self, fraction, text):
+                cb(fraction, text)
+
+            def on_finished(self, mesh, exc):
+                result["mesh"] = mesh
+                result["exc"] = exc
+                loop.quit()
+
+        relay = _Relay(self)
+        worker.progressed.connect(relay.on_progress, Qt.QueuedConnection)
+        worker.finished.connect(relay.on_finished, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        thread.start()
+        loop.exec()
+        thread.quit()
+        thread.wait()
+        worker.deleteLater()
+        relay.deleteLater()
+        return result.get("mesh"), result.get("exc")
 
     def _prepare_import_display(self, cmd, cb) -> None:
         """Pre-build the render/pick caches of freshly imported groups while
@@ -3477,49 +4990,16 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.statusBar().showMessage(tr("Imported {name}", name=path.name), 3000)
 
-    # ---- SKP via the skp2dae satellite converter -----------------------------
-    @staticmethod
-    def _find_skp_converter():
-        """Locate the external skp2dae converter and return the command list
-        to invoke it, or ``None``. Search order: ``SKP2DAE_EXE`` env var,
-        ``~/.local/share/skp2dae/skp2dae.exe``, then ``skp2dae`` on PATH.
-        The converter is a SEPARATE program (it loads Trimble's proprietary
-        SketchUpAPI.dll, which can never ship inside GPL IngeTrazo); on
-        Linux a ``.exe`` runs through Wine."""
-        import os
-        import shutil
-        import sys as _sys
-        candidates = []
-        env = os.environ.get("SKP2DAE_EXE")
-        if env:
-            candidates.append(Path(env))
-        candidates.append(
-            Path.home() / ".local" / "share" / "skp2dae" / "skp2dae.exe")
-        which = shutil.which("skp2dae")
-        if which:
-            candidates.append(Path(which))
-        for cand in candidates:
-            if not cand.exists():
-                continue
-            if cand.suffix.lower() == ".exe" and _sys.platform != "win32":
-                wine = shutil.which("wine")
-                if wine:
-                    return [wine, str(cand)]
-                continue
-            return [str(cand)]
-        return None
-
+    # ---- SKP import: IngeTrazo's own reader (formats/skp.py) -----------------
     def import_skp_path(self, skp: Path) -> bool:
-        """Import ``skp``. Prefers a pure-Python parser backend (offline, no
-        Wine/DLL — see ``formats/skp.py``); falls back to the external skp2dae
-        converter for versions no pure backend can read yet (its .dae and
-        texture folder land NEXT TO the .skp, so texture paths stay valid for
-        the session and for saved documents)."""
+        """Import ``skp`` with IngeTrazo's own pure-Python reader (offline,
+        no Wine, no external converter -- see ``formats/skp.py``). A file it
+        cannot read is reported, with the way around it (export COLLADA or
+        OBJ from the original program)."""
         from formats import skp as skp_format
         if skp_format.can_handle(skp):
-            # Heavy parse OUTSIDE the undo history: decide pure-vs-converter
-            # before touching the scene, so a failed/empty parse never leaves a
-            # half-applied edit. NeedsConverter → fall through to skp2dae.
+            # Heavy parse OUTSIDE the undo history, so a failed/empty parse
+            # never leaves a half-applied edit.
             dlg, cb = self._import_progress(
                 tr("Importing {name}…", name=skp.name))
             # The parse is heavy (seconds on a big model) and pure-Python, so
@@ -3530,10 +5010,7 @@ class MainWindow(QMainWindow):
             # thread below.
             payload, exc = self._parse_skp_threaded(skp, cb)
             if isinstance(exc, skp_format.NeedsConverter):
-                payload = None
-                self.statusBar().showMessage(tr(
-                    "Pure importer unavailable for this file — using the "
-                    "external converter (slower)."), 8000)
+                payload = None             # unreadable: said below
             elif exc is not None:
                 dlg.close()
                 QMessageBox.critical(self, tr("Import SKP failed"), str(exc))
@@ -3552,179 +5029,32 @@ class MainWindow(QMainWindow):
                 self.viewport.update()
                 self._import_name = skp.name
                 self._update_title()
-                self.statusBar().showMessage(
-                    tr("Imported {name}", name=skp.name), 3000)
+                if payload.get("empty"):
+                    # A template or blank file (#103): say so, or an empty
+                    # viewport reads as a failed import.
+                    self.statusBar().showMessage(tr(
+                        "{name} has no geometry — nothing to import.",
+                        name=skp.name), 8000)
+                else:
+                    self.statusBar().showMessage(
+                        tr("Imported {name}", name=skp.name), 3000)
                 return True
-            dlg.close()   # no pure backend could read it → converter below
+            dlg.close()   # the reader could not read it: said below
 
-        # ---- Fallback: the external skp2dae converter (Trimble DLL via Wine) --
-        command = self._find_skp_converter()
-        if command is None:
-            answer = QMessageBox.question(
-                self, tr("Import SKP"),
-                tr("Opening .skp needs the skp2dae converter (a separate "
-                   "program IngeTrazo launches).\n\n"
-                   "Install it automatically? This downloads:\n"
-                   "• skp2dae.exe from the IngeTrazo releases (free "
-                   "software, MIT), and\n"
-                   "• the official SketchUp library (SketchUpAPI.dll) from "
-                   "the public release of Blender's 'SketchUp Importer' "
-                   "add-on (a third-party project).\n\n"
-                   "Everything lands in ~/.local/share/skp2dae/."),
-                QMessageBox.Yes | QMessageBox.No)
-            if answer != QMessageBox.Yes:
-                return False
-            if not self._install_skp_converter():
-                return False
-            command = self._find_skp_converter()
-            if command is None:
-                return False
-        import shutil
-        import subprocess
-        import tempfile
-        import unicodedata
-        from PySide6.QtCore import Qt as _Qt
-        from PySide6.QtWidgets import QApplication
-
-        # Wine re-encodes argv to the Windows ANSI codepage, so an accented
-        # path ("Imágenes", "ñandú.skp") reaches the converter — and the
-        # SDK's UTF-8 file API — mangled. Sidestep it: convert through a
-        # temporary ASCII path and move the results next to the original.
-        # The texture folder keeps the .dae's stem (its internal refs are
-        # relative to that name), so accented stems come back sanitized.
-        ascii_stem = unicodedata.normalize("NFKD", skp.stem)
-        ascii_stem = ascii_stem.encode("ascii", "ignore").decode() or "modelo"
-        needs_tmp = any(ord(c) > 127 for c in str(skp))
-        tmpdir: Path | None = None
-        if needs_tmp:
-            tmpdir = Path(tempfile.mkdtemp(prefix="skp2dae-"))
-            work_skp = tmpdir / (ascii_stem + ".skp")
-            shutil.copy(skp, work_skp)
-        else:
-            work_skp = skp
-        work_dae = work_skp.with_suffix(".dae")
-
-        self.statusBar().showMessage(
-            tr("Converting {name}… (skp2dae)", name=skp.name))
-        QApplication.setOverrideCursor(_Qt.WaitCursor)
-        try:
-            result = subprocess.run(
-                command + [str(work_skp), str(work_dae)],
-                capture_output=True, timeout=600)
-        except Exception as exc:  # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, tr("Import SKP failed"), str(exc))
-            return False
-        QApplication.restoreOverrideCursor()
-        # The converter (under Wine) may emit codepage bytes — never assume
-        # UTF-8 when surfacing its output.
-        detail = (result.stderr or result.stdout or b"").decode(
-            "utf-8", errors="replace").strip()[-800:]
-        if result.returncode != 0 or not work_dae.exists():
-            QMessageBox.critical(
-                self, tr("Import SKP failed"),
-                detail or tr("The converter produced no output."))
-            return False
-        dae = work_dae
-        if tmpdir is not None:
-            dae = skp.parent / work_dae.name
-            shutil.move(str(work_dae), dae)
-            tex_dir = tmpdir / ascii_stem
-            if tex_dir.is_dir():
-                target = skp.parent / ascii_stem
-                if target.exists():
-                    shutil.rmtree(target)
-                shutil.move(str(tex_dir), target)
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        self._import_dae_path(dae)
-        self._import_name = skp.name
-        self._update_title()
-        return True
-
-    # URL del exe limpio (solo codigo MIT: bindea la DLL en runtime, no
-    # contiene nada de Trimble) — se publica como asset de los releases.
-    _SKP2DAE_EXE_URL = ("https://github.com/ingelibre/ingetrazo/releases/"
-                        "latest/download/skp2dae.exe")
-    #: Repo público del add-on de Blender cuyo release trae SketchUpAPI.dll.
-    _SKP_ADDON_REPO = "RedHaloStudio/Sketchup_Importer"
-
-    @staticmethod
-    def _download_bytes(url: str, timeout: int = 120) -> bytes:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "IngeTrazo"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-
-    @staticmethod
-    def _extract_skp_dlls(zip_bytes: bytes, dest: Path) -> list[str]:
-        """Pull the SketchUp runtime DLLs out of the add-on zip into ``dest``.
-        Returns the names extracted (empty when none found)."""
-        import io
-        import zipfile
-        wanted = ("SketchUpAPI.dll", "SketchUpCommonPreferences.dll")
-        got = []
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            for entry in zf.namelist():
-                base = entry.rsplit("/", 1)[-1]
-                if base in wanted and base not in got:
-                    (dest / base).write_bytes(zf.read(entry))
-                    got.append(base)
-        return got
-
-    def _install_skp_converter(self) -> bool:
-        """One-click install of the skp2dae converter for non-technical
-        users: the MIT exe comes from OUR releases; the proprietary SketchUp
-        DLL is fetched by the USER'S machine from the Blender add-on's own
-        public release (never hosted or redistributed by us)."""
-        import json as _json
-        from PySide6.QtCore import Qt as _Qt
-        from PySide6.QtWidgets import QApplication
-        dest = Path.home() / ".local" / "share" / "skp2dae"
-        dest.mkdir(parents=True, exist_ok=True)
-        QApplication.setOverrideCursor(_Qt.WaitCursor)
-        try:
-            self.statusBar().showMessage(tr("Downloading skp2dae…"))
-            QApplication.processEvents()
-            (dest / "skp2dae.exe").write_bytes(
-                self._download_bytes(self._SKP2DAE_EXE_URL))
-
-            self.statusBar().showMessage(
-                tr("Downloading the SketchUp library (Blender add-on)…"))
-            QApplication.processEvents()
-            api = (f"https://api.github.com/repos/{self._SKP_ADDON_REPO}"
-                   "/releases/latest")
-            release = _json.loads(self._download_bytes(api).decode("utf-8"))
-            asset_url = next(
-                a["browser_download_url"] for a in release.get("assets", [])
-                if a["name"].lower().endswith(".zip"))
-            got = self._extract_skp_dlls(
-                self._download_bytes(asset_url, timeout=300), dest)
-            if "SketchUpAPI.dll" not in got:
-                raise RuntimeError(
-                    tr("The add-on zip did not contain SketchUpAPI.dll"))
-        except Exception as exc:  # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, tr("Import SKP"),
-                                 tr("Automatic install failed: {err}",
-                                    err=str(exc)))
-            return False
-        QApplication.restoreOverrideCursor()
-        import shutil as _shutil
-        import sys as _sys
-        if _sys.platform != "win32" and _shutil.which("wine") is None:
-            QMessageBox.information(
-                self, tr("Import SKP"),
-                tr("Converter installed, but Wine is missing. Install it "
-                   "with your package manager (e.g. sudo apt install wine) "
-                   "and try again."))
-            return False
-        self.statusBar().showMessage(tr("skp2dae converter installed"), 4000)
-        return True
+        # No converter behind this: IngeTrazo reads .skp with its own
+        # reader only.
+        QMessageBox.warning(
+            self, tr("Import SKP"),
+            tr("IngeTrazo could not read {name} with its built-in .skp "
+               "reader.\n\nOpen it in the program it came from and export "
+               "it as COLLADA (.dae) or OBJ, then import that file here.",
+               name=skp.name))
+        return False
 
     def _on_import_skp(self) -> None:
         path_str, _ = file_dialogs.getOpenFileName(
             self, tr("Import SKP"), "",
-            tr("SketchUp (*.skp);;All files (*)"))
+            tr("SKP (*.skp);;All files (*)"))
         if not path_str:
             return
         self.import_skp_path(Path(path_str))
@@ -3795,12 +5125,9 @@ class MainWindow(QMainWindow):
 
     def _on_import_igz(self) -> None:
         """Bring another IngeTrazo document in as ONE component, placed
-        with a click — SketchUp's Import of a .skp. Furniture drawn in its
+        with a click — the classic import of a .skp. Furniture drawn in its
         own file (a pergola, an arch, a lamp post) lands in the plaza with
         its groups, materials and layers intact (see :mod:`core.insert`)."""
-        from core.insert import import_document_as_component
-        from core.scene import Scene as _Scene
-        from formats import igz as _igz
         start = (str(self._current_path.parent)
                  if self._current_path is not None else "")
         path_str, _ = file_dialogs.getOpenFileName(
@@ -3814,25 +5141,50 @@ class MainWindow(QMainWindow):
                 self, tr("Import IngeTrazo document"),
                 tr("That is the document you are editing."))
             return
-        self.viewport.end_group_edit()
-        temp = _Scene()
         try:
-            _igz.load_into(temp, path)
+            comp = self.import_igz_path(path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self, tr("Import IngeTrazo document failed"), str(exc))
             return
-        comp = import_document_as_component(self.viewport.scene, temp,
-                                            path.stem)
         if comp is None:
             QMessageBox.warning(
                 self, tr("Import IngeTrazo document"),
                 tr("“{name}” has no geometry.", name=path.name))
-            return
-        # The file's origin is the handle (SketchUp's component axes): the
-        # arch's footings, drawn below z=0, go below grade in the plaza too.
+
+    def import_igz_path(self, path, at=None):
+        """Insert the IngeTrazo document at ``path`` as ONE component,
+        without a file dialog — for extensions and scripts (issue #179,
+        a palette that inserts components as the mouse moves).
+
+        ``at=None`` hands it to the placement tool: it follows the cursor
+        and a click drops it, as File ▸ Import does. ``at`` a point
+        (``QVector3D`` or ``(x, y, z)`` in metres) inserts it with its
+        origin there at once, in one undo step. Returns the component, or
+        ``None`` when the file has no geometry; a file that cannot be read
+        raises (``OSError``, ``ValueError``…), and nothing is changed."""
         from PySide6.QtGui import QVector3D
-        self._start_place(comp, anchor=QVector3D(0.0, 0.0, 0.0))
+        from core.insert import import_document_as_component
+        from core.scene import Scene as _Scene
+        from formats import igz as _igz
+        path = Path(path)
+        temp = _Scene()
+        _igz.load_into(temp, path)            # raises before anything moves
+        self.viewport.end_group_edit()
+        comp = import_document_as_component(self.viewport.scene, temp,
+                                            path.stem)
+        if comp is None:
+            return None
+        # The file's origin is the handle (the component axes): the
+        # arch's footings, drawn below z=0, go below grade in the plaza too.
+        origin = QVector3D(0.0, 0.0, 0.0)
+        if at is None:
+            self._start_place(comp, anchor=origin)
+        else:
+            from tools.place_group import PlaceGroupTool
+            point = at if isinstance(at, QVector3D) else QVector3D(*at)
+            PlaceGroupTool(comp, anchor=origin).place_at(self.viewport, point)
+        return comp
 
     def _on_import_obj(self) -> None:
         path_str, _ = file_dialogs.getOpenFileName(
@@ -3860,8 +5212,81 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.statusBar().showMessage(tr("Imported {name}", name=path.name), 3000)
 
+    def _on_import_stl(self) -> None:
+        from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
+                                       QFormLayout)
+
+        path_str, _ = file_dialogs.getOpenFileName(
+            self, tr("Import STL"), "",
+            tr("STL mesh (*.stl);;All files (*)"))
+        if not path_str:
+            return
+        path = Path(path_str)
+        keys = ["m", "cm", "mm", "in", "ft"]
+        labels = [tr("Metres"), tr("Centimetres"), tr("Millimetres"),
+                  tr("Inches"), tr("Feet")]
+        settings = QSettings()
+        guess = str(settings.value("import/stl_unit", "mm") or "mm")
+        idx = keys.index(guess) if guess in keys else keys.index("mm")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Import STL"))
+        form = QFormLayout(dialog)
+        units = QComboBox(dialog)
+        units.addItems(labels)
+        units.setCurrentIndex(idx)
+        form.addRow(
+            tr("An STL file does not record its unit. What is this model in?"),
+            units)
+        simplify = QComboBox(dialog)
+        simplify.addItem(tr("No mesh simplification"), "none")
+        simplify.addItem(
+            tr("Merge coplanar triangles on XY, XZ and YZ planes"),
+            "principal")
+        simplify.addItem(
+            tr("Advanced: merge all coplanar surfaces"), "all")
+        simplify_mode = str(
+            settings.value("import/stl_simplify_mode", "principal"))
+        simplify_index = simplify.findData(simplify_mode)
+        simplify.setCurrentIndex(simplify_index if simplify_index >= 0 else 1)
+        form.addRow(tr("Mesh simplification"), simplify)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        unit = keys[units.currentIndex()]
+        scale = stl_format.STL_UNITS[unit]
+        simplify_mode = simplify.currentData()
+        settings.setValue("import/stl_unit", unit)
+        settings.setValue("import/stl_simplify_mode", simplify_mode)
+        dlg, cb = self._import_progress(
+            tr("Importing {name}…", name=path.name))
+        target, exc = self._parse_stl_threaded(
+            path, scale, simplify_mode, cb)
+        if exc is not None:
+            dlg.close()
+            QMessageBox.critical(self, tr("Import STL failed"), str(exc))
+            return
+        cmd = SnapshotImport(
+            lambda scene: stl_format.add_stl_mesh(scene, path, target))
+        try:
+            self.viewport.history.execute(cmd)
+        except Exception as exc:  # noqa: BLE001
+            dlg.close()
+            QMessageBox.critical(self, tr("Import STL failed"), str(exc))
+            return
+        self._prepare_import_display(cmd, cb)
+        dlg.close()
+        self.viewport.update()
+        self._import_name = path.name
+        self._update_title()
+        self.statusBar().showMessage(tr("Imported {name}", name=path.name), 3000)
+
     def _on_import_image(self) -> None:
-        """Import a picture to trace over (SketchUp's ``Import ▸ image``).
+        """Import a picture to trace over (``Import ▸ image``).
 
         The file is copied into the texture cache straight away, so the model
         never depends on where the user happened to leave the original — the
@@ -4144,7 +5569,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, tr("Import DWG failed"),
                 tr("The LibreDWG converter (dwg2dxf) is not available in "
-                   "this installation."))
+                   "this installation.") + "\n\n" +
+                tr("To work on the drawing anyway: save it as DXF from your "
+                   "CAD program (or convert it with a free DWG → DXF "
+                   "converter such as ODA File Converter), then File ▸ "
+                   "Import ▸ AutoCAD DXF."))
             return False
         dlg, cb = self._import_progress(tr("Importing {name}…",
                                            name=path.name))
@@ -4532,11 +5961,6 @@ class MainWindow(QMainWindow):
     def _on_export_obj(self) -> None:
         self._export("OBJ", "obj", tr("Wavefront OBJ (*.obj)"), obj_format.save_obj)
 
-    def _on_export_skp(self) -> None:
-        """Native SketchUp export — opens directly in SketchUp 2017+."""
-        self._export("SketchUp", "skp", tr("SketchUp (*.skp)"),
-                     skp_out_format.save_skp)
-
     def _on_export_glb(self) -> None:
         """Single-file 3D export (geometry + materials + textures embedded).
         Best format for 'send it so a colleague can view it' — no texture folder
@@ -4544,7 +5968,7 @@ class MainWindow(QMainWindow):
         self._export("GLB", "glb", tr("glTF binary (*.glb)"), gltf_format.save_glb)
 
     def _on_export_dae(self) -> None:
-        """COLLADA export — the 'open it back in SketchUp' bridge. Copies the
+        """COLLADA export — the 'open it back in the original program' bridge. Copies the
         texture images beside the .dae (send both, or use GLB)."""
         self._export("COLLADA", "dae", tr("COLLADA (*.dae)"), dae_format.save_dae)
 
@@ -4554,8 +5978,46 @@ class MainWindow(QMainWindow):
         self.georef_tray.survey._on_import()
         self.georef_tray.raise_()
 
+    def _on_export_view_dxf(self) -> None:
+        """The view on screen as a 2D line drawing for CAD, hidden lines
+        removed (José Castro Basso, FADU–UDELAR). Parallel: true size in
+        metres, edges / profiles / section cut on their own layers, as the
+        composer's «Export view as DXF». Perspective (two-point included):
+        what the window shows, true size at the depth of the orbit
+        target."""
+        path, _ = file_dialogs.getSaveFileName(
+            self, tr("Export current view as DXF"), "vista.dxf",
+            "DXF (*.dxf)")
+        if not path:
+            return
+        from core.hlr import (KIND_CUT, KIND_PROFILE, hlr_drawing,
+                              hlr_perspective)
+        from formats.dxf_out import save_dxf_layers
+        vp = self.viewport
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            geometry = vp.hlr_geometry()
+            if vp.camera.perspective:
+                groups = [("VISTA", hlr_perspective(vp.scene, vp.camera,
+                                                    geometry=geometry))]
+            else:
+                d = hlr_drawing(vp.scene, vp.camera, geometry=geometry)
+                k = d.kinds
+                groups = [("VISTA", d.segs[(k != KIND_CUT)
+                                           & (k != KIND_PROFILE)]),
+                          ("VISTA-PERFIL", d.segs[k == KIND_PROFILE]),
+                          ("VISTA-CORTE", d.segs[k == KIND_CUT])]
+            n = save_dxf_layers(path, groups)
+        except Exception as exc:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, tr("Export DXF failed"), str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage(
+            tr("Exported {n} lines to {name}", n=n, name=path), 5000)
+
     def _on_export_image(self) -> None:
-        """Hi-res 2D export of the current view (SketchUp's 'Export 2D
+        """Hi-res 2D export of the current view ('Export 2D
         Graphic'): pick a file and a pixel width; height follows the
         viewport's aspect so the image matches exactly what you framed."""
         from PySide6.QtWidgets import QInputDialog
@@ -4606,25 +6068,62 @@ class MainWindow(QMainWindow):
         """Return True if it's safe to discard the current drawing."""
         if not self._is_dirty():
             return True
-        answer = QMessageBox.question(
-            self,
-            tr("Unsaved changes"),
+        # Built by hand rather than with QMessageBox.question: on macOS
+        # that is a NATIVE alert, which draws «Don't Save» as a red
+        # destructive button — and under the dark scheme main.py forces,
+        # red text on a black button, barely readable. Qt's own dialog
+        # wears the app's palette, like every other window here.
+        box = QMessageBox(
+            QMessageBox.Question, tr("Unsaved changes"),
             tr("{prompt}\n\nUnsaved changes will be lost.", prompt=prompt),
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-            QMessageBox.Save,
-        )
+            self)
+        box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+        # main.py installs a Qt translator that already names the standard
+        # buttons in the app language, but only when the qtbase_<lang>.qm
+        # file is found, and «Don't Save» is worded differently per
+        # platform: name all three through our own catalog so they read
+        # the same everywhere.
+        for button, text in ((QMessageBox.Save, "Save"),
+                             (QMessageBox.Discard, "Don't Save"),
+                             (QMessageBox.Cancel, "Cancel")):
+            box.button(button).setText(tr(text))
+        box.setDefaultButton(QMessageBox.Save)
+        answer = box.exec()
         if answer == QMessageBox.Save:
             self._on_save()
             return not self._is_dirty()
         return answer == QMessageBox.Discard
 
+    # "Saved" is recorded as the scene version at that moment (as every
+    # caller and test has always written it) and kept as the CONTENT version:
+    # a later selection bumps ``scene.version`` for the GL caches but not
+    # ``content_version``, so a click after Ctrl+S no longer asks to save
+    # again (issue #159). -1 stays "never saved".
+    @property
+    def _saved_version(self) -> int:
+        return self._saved_content
+
+    @_saved_version.setter
+    def _saved_version(self, version: int) -> None:
+        viewport = getattr(self, "viewport", None)
+        scene = getattr(viewport, "scene", None)
+        view = getattr(scene, "view_version", 0) if version >= 0 else 0
+        self._saved_content = version - view
+
     def _is_dirty(self) -> bool:
-        return self.viewport.scene.version != self._saved_version
+        if self._workspace is not None:
+            return bool(self._workspace.is_dirty())
+        return self.viewport.scene.content_version != self._saved_content
 
     def _on_scene_version_changed(self, _version: int) -> None:
         self._update_title()
 
     def _update_title(self) -> None:
+        if self._workspace is not None:
+            marker = " *" if self._is_dirty() else ""
+            self.setWindowTitle(f"IngeTrazo — {self._workspace.title()}{marker}")
+            return
         if self._current_path is not None:
             name = self._current_path.name
         elif self._import_name:
@@ -4637,6 +6136,10 @@ class MainWindow(QMainWindow):
 
     # ---- Window lifecycle ---------------------------------------------------
     def closeEvent(self, event) -> None:
+        # A workspace first (its own unsaved job), then the model it parked.
+        if self._workspace is not None and not self.leave_workspace():
+            event.ignore()
+            return
         if not self._confirm_discard(tr("Quit IngeTrazo?")):
             event.ignore()
             return

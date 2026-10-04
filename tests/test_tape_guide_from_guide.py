@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """Tape Measure pulls a guide from a GUIDE, not only from an edge.
 
-Issue #22 (@pacaeiro): in SketchUp you click a guide line's body with the
+Issue #22 (@pacaeiro): the usual way, you click a guide line's body with the
 Tape and drag (or type) to lay a second guide parallel to it — that is how a
 grid of guides is built. Ours only accepted mesh edges as the source, because
 the tool picked with the mesh edge picker, which never sees guides.
@@ -65,6 +65,19 @@ def test_a_guide_pulled_from_a_guide_is_parallel_at_the_offset():
     g = scene.guides[1]
     assert abs(abs(QVector3D.dotProduct(g.direction, V(1, 0, 0))) - 1.0) < 1e-6
     assert abs(g.point.y() - 3.5) < 1e-6
+
+
+def test_zero_offset_from_a_guide_can_create_a_coincident_guide():
+    scene = Scene()
+    first = Guide(V(0, 1, 0), V(1, 0, 0))
+    scene.guides.append(first)
+    vp = _Vp(scene, guide=first)
+    tool = TapeMeasureTool()
+    tool.on_click(_ctx(vp, 3, 1))
+    tool.on_click(_ctx(vp, 3, 1, kind=None))
+    assert len(scene.guides) == 2
+    assert scene.guides[0] is first
+    assert abs(scene.guides[1].point.y() - 1.0) < 1e-6
 
 
 def test_a_typed_distance_places_the_guide_exactly():

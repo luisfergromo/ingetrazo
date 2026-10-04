@@ -5,8 +5,8 @@
 Behavior:
 - Left click on / near an edge: select that edge. Click on a face interior
   (when no edge is closer): select the face. Edges win ties because they sit
-  on top of faces, matching SketchUp.
-- Modifiers, SketchUp's own: Shift-click TOGGLES what it picks (click an
+  on top of faces, the usual convention.
+- Modifiers, the classic ones: Shift-click TOGGLES what it picks (click an
   already-selected line or face to drop it out of the selection — the way you
   carve a wall out of a box selection), Ctrl-click adds, Shift+Ctrl-click
   removes, and a plain click replaces the whole selection. The rubber-band box
@@ -17,6 +17,8 @@ Behavior:
 - Delete / Backspace: remove the selected edges and faces from the scene.
 """
 from __future__ import annotations
+
+from views import prompts as _prompts
 
 from PySide6.QtCore import Qt
 
@@ -45,7 +47,7 @@ from tools.base import Tool, ToolContext
 
 def selection_mode(modifiers) -> str:
     """How a click (or a rubber-band box) joins the current selection, from
-    the keyboard modifiers — SketchUp's rules: Shift toggles, Ctrl adds,
+    the keyboard modifiers — the classic rules: Shift toggles, Ctrl adds,
     Shift+Ctrl removes, nothing replaces."""
     shift = bool(modifiers & Qt.ShiftModifier)
     ctrl = bool(modifiers & Qt.ControlModifier)
@@ -208,6 +210,10 @@ def _seg_rect_overlap(a, b, rect) -> bool:
 class SelectTool(Tool):
     name = "Select"
     shortcut = ""  # Space, bound in main_window; "S" is Scale
+    description = (
+        "Pick edges, faces and objects. Shift+click adds or takes away, "
+        "Ctrl+click adds, Shift+Ctrl+click takes away; the same with a "
+        "box.")
     uses_snap = False  # selecting picks geometry; no snap markers
     box_select = True   # supports the rubber-band window / crossing box
 
@@ -230,10 +236,14 @@ class SelectTool(Tool):
             if label is not None:
                 return label
         group = viewport.pick_group(screen_x, screen_y)
-        edge = viewport.pick_edge(screen_x, screen_y)
+        # Only an edge the user can SEE takes the click (issue #71): the
+        # hidden seams of a smooth surface, or edges behind the model, left
+        # a cylinder's side all but unclickable.
+        pick_visible = getattr(viewport, "pick_visible_edge", None)
+        edge = (pick_visible or viewport.pick_edge)(screen_x, screen_y)
         if group is not None and edge is not None:
             # A loose line drawn ON a group's face (or crossing in front of
-            # it) is the deliberate target — SketchUp picks the thin edge
+            # it) is the deliberate target — the thin edge is picked
             # before the object behind it. Only a VISIBLE edge wins: one
             # hidden behind the group's faces leaves the group as the pick.
             point = getattr(viewport, "edge_point_under_cursor", None)
@@ -256,12 +266,12 @@ class SelectTool(Tool):
         path = viewport.pick_geopath(screen_x, screen_y)
         if path is not None:
             return path
-        # Section planes pick by their frame (SketchUp), above guides.
+        # Section planes pick by their frame, above guides.
         pick_sec = getattr(viewport, "pick_section_plane", None)
         sec = pick_sec(screen_x, screen_y) if pick_sec else None
         if sec is not None:
             return sec
-        # Guides select like in SketchUp (click + Delete / right-click). Real
+        # Guides select the usual way (click + Delete / right-click). Real
         # geometry outranks them; a guide crossing a face still beats the face
         # (a thin line is the more deliberate target).
         pick_guide = getattr(viewport, "pick_guide", None)
@@ -279,8 +289,19 @@ class SelectTool(Tool):
 
     def on_click(self, ctx: ToolContext) -> None:
         viewport = ctx.viewport
-        entity = self._pick(viewport, ctx.screen.x(), ctx.screen.y())
         mode = selection_mode(ctx.modifiers)
+        # An extension's item (a render light) is drawn over the model, so
+        # a click on it outranks the geometry behind (issue #205).
+        pick_item = getattr(viewport, "pick_extension_item", None)
+        hit = (pick_item(ctx.screen.x(), ctx.screen.y())
+               if pick_item is not None else None)
+        if hit is not None:
+            viewport.scene.clear_selection()
+            viewport.set_extension_pick(hit)
+            return
+        if getattr(viewport, "extension_pick", None) is not None:
+            viewport.clear_extension_pick()
+        entity = self._pick(viewport, ctx.screen.x(), ctx.screen.y())
         if entity is None:
             if viewport.scene.edit_group is not None and mode == "replace" \
                     and not viewport.scene.selection:
@@ -299,7 +320,7 @@ class SelectTool(Tool):
     def _expand(viewport, entity):
         """Grow a pick to its natural whole: a curved surface (faces joined by
         soft edges) for a face, or the whole drawn curve (circle/arc) for one of
-        its segments — SketchUp-style. Plain entities select alone."""
+        its segments — the classic behaviour. Plain entities select alone."""
         if isinstance(entity, Face):
             return viewport.scene.mesh.surface_of(entity)
         if isinstance(entity, Edge) and getattr(entity, "curve", None) is not None:
@@ -307,26 +328,26 @@ class SelectTool(Tool):
         return [entity]
 
     def on_double_click(self, ctx: ToolContext) -> None:
-        """SketchUp double click: a face selects itself plus its bounding
+        """Double click: a face selects itself plus its bounding
         edges; an edge selects itself plus its faces — and a GROUP opens for
         editing (Groups v2: draw, push, erase inside it)."""
         viewport = ctx.viewport
         entity = self._pick(viewport, ctx.screen.x(), ctx.screen.y())
         if isinstance(entity, Group):
-            # A 3D text too: double-click ENTERS it, as in SketchUp (its
+            # A 3D text too: double-click ENTERS it, as users expect (its
             # letters are groups); re-editing the text is the right-click's
             # «Edit 3D Text…» (Marco, 2026-09-18).
             viewport.begin_group_edit(entity)
             return
         if isinstance(entity, SectionPlane):
-            # SketchUp: double-clicking a section plane toggles the active cut.
+            # Double-clicking a section plane toggles the active cut.
             viewport.history.execute(SetActiveSectionCommand(
                 None if entity.active else entity))
             viewport.scene.select([entity])
             viewport.update()
             return
         if isinstance(entity, TextLabel):
-            # SketchUp-style: double-clicking a leader text edits its text.
+            # As usual, double-clicking a leader text edits its text.
             from PySide6.QtWidgets import QInputDialog
             from core.i18n import tr
             text, ok = QInputDialog.getMultiLineText(
@@ -338,7 +359,7 @@ class SelectTool(Tool):
             viewport.update()
             return
         if isinstance(entity, Dimension):
-            # SketchUp: double-clicking the dimension text edits it; "<>"
+            # Double-clicking the dimension text edits it; "<>"
             # stands for the measured value, and an empty text (or a bare
             # "<>") goes back to the automatic value.
             from PySide6.QtWidgets import QInputDialog
@@ -349,7 +370,7 @@ class SelectTool(Tool):
             measured = (fmt(entity.value(), style) if fmt is not None
                         else entity.label())
             current = entity.text if entity.text else measured
-            text, ok = QInputDialog.getText(
+            text, ok = _prompts.get_text(
                 viewport.window(), tr("Dimension"),
                 tr("Dimension text (<> = measured value):"), text=current)
             if ok:
@@ -384,42 +405,15 @@ class SelectTool(Tool):
         viewport.update()
 
     def on_triple_click(self, ctx: ToolContext) -> None:
-        """SketchUp triple click: everything physically connected to the
+        """Triple click: everything physically connected to the
         picked entity (the whole solid), walked through shared vertices."""
         viewport = ctx.viewport
         entity = self._pick(viewport, ctx.screen.x(), ctx.screen.y())
         if not isinstance(entity, (Face, Edge)):
             self.on_click(ctx)
             return
-        if isinstance(entity, Face):
-            seeds = list(entity.loop) + [v for h in entity.hole_loops
-                                         for v in h]
-        else:
-            seeds = [entity.v0, entity.v1]
-        seen_v = set(seeds)
-        edges: set = set()
-        faces: set = set()
-        stack = list(seeds)
-        while stack:
-            v = stack.pop()
-            for e in v.edges:
-                if e in edges:
-                    continue
-                edges.add(e)
-                for f in e.faces:
-                    if f in faces:
-                        continue
-                    faces.add(f)
-                    for lp in (f.loop, *f.hole_loops):
-                        for w in lp:
-                            if w not in seen_v:
-                                seen_v.add(w)
-                                stack.append(w)
-                w = e.other(v)
-                if w not in seen_v:
-                    seen_v.add(w)
-                    stack.append(w)
-        viewport.scene.select(list(edges) + list(faces),
+        from core.select_ops import all_connected
+        viewport.scene.select(all_connected([entity]),
                               mode=selection_mode(ctx.modifiers))
         viewport.update()
 
@@ -468,7 +462,7 @@ class SelectTool(Tool):
         # report). Window mode: every vertex inside. Crossing mode: any vertex
         # inside, else any wireframe edge touching the box. Early exits keep
         # the common reject cheap. Inside a group the box works on what the
-        # open group holds (SketchUp): its loose geometry above, and its
+        # open group holds: its loose geometry above, and its
         # CHILDREN here — the parts of an imported fountain are groups, and
         # a box that skipped them could never take the whole fountain
         # («quiero seleccionar toda esa pileta, no selecciona», Marco,
@@ -533,7 +527,7 @@ class SelectTool(Tool):
                     if inside:
                         picked.append(group)
         # Guides: an infinite line can never be fully enclosed, so a window
-        # box skips it and only a crossing box takes it (SketchUp). Guide
+        # box skips it and only a crossing box takes it. Guide
         # points behave like any point. The line is clipped to the part in
         # front of the camera before projecting (as render/snap do).
         for g in getattr(viewport.scene, "guides", []):
@@ -581,42 +575,80 @@ class SelectTool(Tool):
             elif _pt_in_rect(pp, rect) and (
                     pa is None or _pt_in_rect(pa, rect)):
                 picked.append(lab)
+        if mode == "replace" and getattr(viewport, "extension_pick",
+                                         None) is not None:
+            viewport.clear_extension_pick()
         viewport.scene.select(picked, additive=additive, mode=mode)
         viewport.update()
 
     def on_key(self, viewport, key: int, modifiers: Qt.KeyboardModifiers) -> bool:
-        if key in (Qt.Key_Delete, Qt.Key_Backspace):
-            selection = viewport.scene.selection
-            if selection:
-                edges = [e for e in selection if isinstance(e, Edge)]
-                faces = [f for f in selection if isinstance(f, Face)]
-                groups = [g for g in selection if isinstance(g, Group)]
-                dims = [d for d in selection if isinstance(d, Dimension)]
-                labels = [t for t in selection if isinstance(t, TextLabel)]
-                paths = [p for p in selection if isinstance(p, GeoPath)]
-                guides = [g for g in selection if isinstance(g, Guide)]
-                splanes = [p for p in selection
-                           if isinstance(p, SectionPlane)]
-                commands = []
-                if edges or faces:
-                    # Erasing an edge between two coplanar faces merges them back
-                    # into one (SketchUp); any other erased edge takes its faces.
-                    commands.append(EraseSelectionCommand(edges, faces))
-                commands.extend(DeleteGroupCommand(g) for g in groups)
-                if guides:
-                    commands.append(DeleteGuidesCommand(guides))
-                if splanes:
-                    commands.append(DeleteSectionPlanesCommand(splanes))
-                if dims:
-                    commands.append(DeleteDimensionsCommand(dims))
-                if labels:
-                    commands.append(DeleteTextLabelsCommand(labels))
-                if paths:
-                    commands.append(DeleteGeoPathsCommand(paths))
-                if commands:
-                    cmd = (commands[0] if len(commands) == 1
-                           else CompoundCommand(commands))
-                    viewport.history.execute(cmd)
-                    viewport.update()
+        if key == Qt.Key_Delete:
+            delete_selection_or_hover(viewport)
+            return True
+        if key == Qt.Key_Backspace:
+            # The selection only, never the hover: with the typed value
+            # emptied, one Backspace too many lands here and must not erase
+            # the face under the cursor.
+            erase_entities(viewport, list(viewport.scene.selection))
             return True
         return False
+
+
+# ---- Delete: the selection, or what is under the cursor ------------------------
+
+def expand_pick(viewport, entity) -> list:
+    """What a click on ``entity`` would select (see ``SelectTool._expand``)."""
+    return SelectTool._expand(viewport, entity)
+
+
+def erase_entities(viewport, entities) -> bool:
+    """Erase ``entities`` (any mix of pickable types) as ONE undoable step.
+    True if anything was erased."""
+    edges = [e for e in entities if isinstance(e, Edge)]
+    faces = [f for f in entities if isinstance(f, Face)]
+    groups = [g for g in entities if isinstance(g, Group)]
+    dims = [d for d in entities if isinstance(d, Dimension)]
+    labels = [t for t in entities if isinstance(t, TextLabel)]
+    paths = [p for p in entities if isinstance(p, GeoPath)]
+    guides = [g for g in entities if isinstance(g, Guide)]
+    splanes = [p for p in entities if isinstance(p, SectionPlane)]
+    commands = []
+    if edges or faces:
+        # Erasing an edge between two coplanar faces merges them back
+        # into one (as usual); any other erased edge takes its faces.
+        commands.append(EraseSelectionCommand(edges, faces))
+    commands.extend(DeleteGroupCommand(g) for g in groups)
+    if guides:
+        commands.append(DeleteGuidesCommand(guides))
+    if splanes:
+        commands.append(DeleteSectionPlanesCommand(splanes))
+    if dims:
+        commands.append(DeleteDimensionsCommand(dims))
+    if labels:
+        commands.append(DeleteTextLabelsCommand(labels))
+    if paths:
+        commands.append(DeleteGeoPathsCommand(paths))
+    if not commands:
+        return False
+    cmd = commands[0] if len(commands) == 1 else CompoundCommand(commands)
+    viewport.history.execute(cmd)
+    viewport.update()
+    return True
+
+
+def delete_selection_or_hover(viewport) -> bool:
+    """The Delete key: erase the selection; with NOTHING selected, erase
+    what is highlighted under the cursor — hover an edge or a face and press
+    Supr, no click needed. The hover grows like a click would (a whole
+    circle, a whole smooth surface), so what goes is what a click-then-Supr
+    would have erased. True if anything was erased."""
+    if getattr(viewport, "extension_pick", None) is not None:
+        return viewport.delete_extension_pick()      # a render light, say
+    selection = list(viewport.scene.selection)
+    if selection:
+        return erase_entities(viewport, selection)
+    hovered = getattr(viewport, "_hover_entity", None)
+    if hovered is None:
+        return False
+    viewport.set_hover(None)        # it is about to be gone
+    return erase_entities(viewport, expand_pick(viewport, hovered))

@@ -4,8 +4,8 @@
 
 After Copy/Cut fills ``viewport.clipboard``, Paste activates this tool: the copied
 faces, edges and groups follow the cursor as a live preview (snapping like any
-draw), and a click stamps them into the scene ONCE and returns to Select
-(SketchUp). The clipboard is kept — paste again for another copy.
+draw), and a click stamps them into the scene ONCE and returns to Select.
+The clipboard is kept — paste again for another copy.
 """
 from __future__ import annotations
 
@@ -33,9 +33,39 @@ def _preview_attrs(attrs, off, face):
         uvw = [gu.x(), gu.y(), gu.z(), cu, gv.x(), gv.y(), gv.z(), cv]
         attrs = {**attrs, "texture": {**t, "uvw": uvw}}
     return translated_attrs(attrs, off)
-from core.history import (AddEdgeCommand, AddFaceCommand, CompoundCommand,
-                          InsertGroupCommand)
+from core.history import (AddEdgeCommand, AddFaceCommand, Command,
+                          CompoundCommand, InsertGroupCommand)
 from tools.base import Tool, ToolContext
+
+
+class _PruneOnUndo(Command):
+    """First in a stamp's compound, so its UNDO runs last: after the stamp's
+    faces and edges are gone, the vertices nothing uses any more go too.
+    ``remove_edge`` only detaches, and the leftovers kept the edit box of a
+    group (which wraps its vertices) at the pasted size after Ctrl+Z. Redo
+    puts them back before the geometry is relinked onto them."""
+
+    def __init__(self) -> None:
+        self._gone: list = []
+
+    def do(self, scene) -> None:
+        from core.mesh import _key
+        m = scene.mesh
+        for v in self._gone:
+            m.vertices.append(v)
+            m._registry.setdefault(_key(v.position), v)
+        if self._gone:
+            m._chunk_dirty = True
+            m._mut_serial += 1     # box / chunk caches key on it
+        self._gone = []
+
+    def undo(self, scene) -> None:
+        m = scene.mesh
+        before = {id(v): v for v in m.vertices}
+        m.prune_orphan_vertices()
+        kept = {id(v) for v in m.vertices}
+        self._gone = [v for k, v in before.items() if k not in kept]
+        scene.version += 1
 
 
 class PasteTool(Tool):
@@ -101,8 +131,48 @@ class PasteTool(Tool):
     def on_click(self, ctx: ToolContext) -> None:
         if self._clip is None:
             return
-        off = ctx.world - self._clip["ref"]
-        commands: list = []
+        if not self.stamp(ctx.viewport, ctx.world - self._clip["ref"]):
+            return
+        # One stamp per paste: hand back to Select. The clipboard
+        # survives, so Ctrl+V stamps another copy.
+        window = getattr(ctx.viewport, "window", None)
+        window = window() if callable(window) else None
+        if window is not None and hasattr(window, "_activate_tool"):
+            window._activate_tool("select")
+        ctx.viewport.update()
+
+    @classmethod
+    def in_place(cls, viewport) -> bool:
+        """Paste in Place: stamp the clipboard at the exact
+        coordinates it was copied from, no cursor placement. The tools work
+        in world coordinates inside an open group too, so copying in one
+        context and pasting in place in another moves geometry into or out
+        of groups without shifting it. Everything pasted ends up selected."""
+        clip = getattr(viewport, "clipboard", None)
+        if not clip:
+            return False
+        tool = cls()
+        tool._clip = clip
+        ok = tool.stamp(viewport, QVector3D(0.0, 0.0, 0.0), select_all=True)
+        viewport.update()
+        return ok
+
+    def stamp(self, viewport, off, select_all: bool = False) -> bool:
+        """Stamp the clipboard displaced by ``off`` as ONE undoable step;
+        False when there was nothing to stamp. ``select_all`` leaves the
+        loose faces and edges selected too (groups always are)."""
+        commands: list = [_PruneOnUndo()]
+        # A face's boundary edges are created BY the face; undoing the face
+        # alone leaves them behind as loose edges (inside a group they read
+        # as debris). Adding them first, as commands of their own, makes the
+        # stamp own them: undo removes the faces, then exactly the edges it
+        # created — an edge that already existed is never touched.
+        for loop, holes, *_r in self._clip["faces"]:
+            for lp in (loop, *holes):
+                n = len(lp)
+                for i in range(n):
+                    commands.append(AddEdgeCommand(
+                        lp[i] + off, lp[(i + 1) % n] + off))
         for loop, holes, *rest in self._clip["faces"]:
             # Copied attrs travel onto the pasted face; a positioned texture's
             # world-anchored UV map is re-fitted to the paste offset.
@@ -113,6 +183,13 @@ class PasteTool(Tool):
                 auto=False,
                 attrs=attrs,
             ))
+        # A face pasted onto a plane that already carries faces merges with
+        # them, as a rectangle drawn there does: overlapping ones split into
+        # their regions instead of lying one on top of the other (issue #73,
+        # @pacaeiro: «if you copy a rectangle on top of the previous one,
+        # the engine is not activated»).
+        commands.extend(_plane_merges(viewport.scene, [
+            [p + off for p in loop] for loop, _holes, *_r in self._clip["faces"]]))
         # Soft/curve flags travel with the copy; curve ids are remapped to
         # FRESH ones so each pasted circle/arc is its own selectable contour
         # (never entangled with the original's).
@@ -129,23 +206,31 @@ class PasteTool(Tool):
         pasted_groups = [copy_group(g, off)
                          for g in self._clip.get("groups", ())]
         commands.extend(InsertGroupCommand(g) for g in pasted_groups)
-        if not commands:
-            return
+        if len(commands) == 1:
+            return False        # only the prune guard: nothing to stamp
         # The scratch preview ends BEFORE the stamp: the pasted groups enter
         # the consolidated VBOs on the version bump like any other insert.
-        self._end_preview(ctx.viewport)
-        cmd = commands[0] if len(commands) == 1 else CompoundCommand(commands)
-        ctx.viewport.history.execute(cmd)
-        if pasted_groups:
+        self._end_preview(viewport)
+        viewport.history.execute(CompoundCommand(commands))
+        picked = list(pasted_groups)
+        if select_all:
+            live = set(map(id, viewport.scene.mesh.faces))
+            picked += [c.face for c in commands
+                       if isinstance(c, AddFaceCommand)
+                       and c.face is not None and id(c.face) in live]
+            # The copied edges themselves (looked up by position: a copy
+            # pasted in place welds onto the original's edges, so the
+            # command may own none of them).
+            mesh = viewport.scene.mesh
+            for a, b, _s, _c in self._clip["edges"]:
+                v0, v1 = mesh.vertex_at(a + off), mesh.vertex_at(b + off)
+                e = mesh.find_edge(v0, v1) if v0 and v1 else None
+                if e is not None:
+                    picked.append(e)
+        if picked:
             # InsertGroupCommand selects only the last one — select them all.
-            ctx.viewport.scene.select(pasted_groups)
-        # One stamp per paste (SketchUp): hand back to Select. The clipboard
-        # survives, so Ctrl+V stamps another copy.
-        window = getattr(ctx.viewport, "window", None)
-        window = window() if callable(window) else None
-        if window is not None and hasattr(window, "_activate_tool"):
-            window._activate_tool("select")
-        ctx.viewport.update()
+            viewport.scene.select(picked)
+        return True
 
     def on_cancel(self, viewport) -> None:
         self._end_preview(viewport)
@@ -183,3 +268,65 @@ class PasteTool(Tool):
             face.attrs = _preview_attrs(attrs, off, face)
             faces.append(face)
         return faces
+
+
+#: More distinct planes than this in one paste is 3D geometry being moved
+#: about, not a flat drawing laid over another: no merge is attempted.
+_MERGE_PLANES_CAP = 24
+
+
+def _plane_merges(scene, loops) -> list:
+    """Scoped plane rebuilds for the planes of the pasted ``loops`` that
+    already carry faces of the target mesh (the drawing tools' own
+    ``RebuildPlaneFacesCommand``). Runs after the faces are added, so the
+    pasted faces cover their own regions."""
+    from core.history import RebuildPlaneFacesCommand
+    from core.triangulate import _newell
+    planes: dict = {}
+    for loop in loops:
+        if len(loop) < 3:
+            continue
+        n = _newell(loop)
+        length = n.length() if n is not None else 0.0
+        if length < 1e-9:
+            continue
+        n = n / length
+        if n.z() < 0 or (n.z() == 0 and (n.y() < 0 or (n.y() == 0 and n.x() < 0))):
+            n = -n
+        d = QVector3D.dotProduct(n, loop[0])
+        key = (round(n.x(), 4), round(n.y(), 4), round(n.z(), 4), round(d, 4))
+        entry = planes.setdefault(key, [QVector3D(loop[0]), n, None, None])
+        for p in loop:
+            xyz = (p.x(), p.y(), p.z())
+            entry[2] = xyz if entry[2] is None else tuple(map(min, entry[2], xyz))
+            entry[3] = xyz if entry[3] is None else tuple(map(max, entry[3], xyz))
+        if len(planes) > _MERGE_PLANES_CAP:
+            return []
+    if not planes or not scene.mesh.faces:
+        return []
+    # Which planes already hold geometry: one vectorised pass over the
+    # mesh's vertices (a paste beside a big model must stay instant); only
+    # then the faces, and only those on that plane whose box meets the
+    # pasted one — a face pasted BESIDE another leaves it alone.
+    import numpy as np
+    pts = np.array([[v.position.x(), v.position.y(), v.position.z()]
+                    for v in scene.mesh.vertices], dtype=np.float64)
+    out = []
+    tol = 1e-4
+    for origin, n, lo, hi in planes.values():
+        nv = np.array([n.x(), n.y(), n.z()])
+        d = float(np.dot(nv, [origin.x(), origin.y(), origin.z()]))
+        if np.count_nonzero(np.abs(pts @ nv - d) < tol) < 3:
+            continue
+        for f in scene.mesh.faces:
+            vs = f.vertices
+            if any(abs(QVector3D.dotProduct(v - origin, n)) > tol for v in vs):
+                continue
+            flo = [min(v.x() for v in vs), min(v.y() for v in vs), min(v.z() for v in vs)]
+            fhi = [max(v.x() for v in vs), max(v.y() for v in vs), max(v.z() for v in vs)]
+            if all(flo[i] < hi[i] - tol and lo[i] < fhi[i] - tol
+                   or abs(fhi[i] - flo[i]) < tol and abs(hi[i] - lo[i]) < tol
+                   for i in range(3)):
+                out.append(RebuildPlaneFacesCommand(origin, n))
+                break
+    return out

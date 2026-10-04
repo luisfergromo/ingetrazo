@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """One status-bar hint at a time, for the tool and the step it is in —
-SketchUp's status bar («Select objects. Shift = Add/Subtract…»), not a
+the classic status bar («Select objects. Shift = Add/Subtract…»), not a
 strip of every shortcut at once (Marco, 2026-09-15: «mostrarlos varios al
 mismo tiempo como que no es bueno»).
 
@@ -15,7 +15,21 @@ from core.i18n import tr
 
 #: Tool key → hint per phase. A plain string is the same hint always.
 HINTS: dict = {
-    "select": "Shift = add/remove, Ctrl = add. Double-click a group to edit it.",
+    "select": "Shift = add/remove, Ctrl = add. Double-click a group to edit it. F3 = search commands.",
+    "change_axes": ("Click the new origin.",
+                    "Click the red direction, then the green one."),
+    "outer_shell": ("Click a solid group or component (1).",
+                    "Click another solid (2) — and more to add them."),
+    "solid_union": ("Click a solid group or component (1).",
+                    "Click another solid (2) — and more to add them."),
+    "solid_subtract": ("Click the solid that cuts (1).",
+                       "Click the solid to cut (2). The first one goes away."),
+    "solid_trim": ("Click the solid that cuts (1).",
+                   "Click the solid to cut (2). The first one stays."),
+    "solid_intersect": ("Click a solid group or component (1).",
+                        "Click another solid (2): only what they share stays."),
+    "solid_split": ("Click a solid group or component (1).",
+                    "Click another solid (2): three pieces come out."),
     "eraser": "Drag over edges to erase them. Shift = hide instead.",
     "paint": "Click a face to paint it. Alt = sample the material under the cursor.",
     "line": ("Click the start point. Arrows lock an axis, Shift locks the inference.",
@@ -24,7 +38,7 @@ HINTS: dict = {
     "rectangle": ("Click the first corner. Arrows pick the plane; Ctrl = centre.",
                   "Click the opposite corner, or type width;height and Enter."),
     "rotated_rect": ("Click the first corner of the base edge.",
-                     "Click the end of the base edge, then the height; or type it."),
+                     "Edge end, then width (or type them). Shift holds the direction."),
     "circle": ("Click the centre. Arrows pick the plane, Down = perpendicular to an edge. Type the sides first.",
                "Click the radius, or type it and Enter."),
     "polygon": ("Click the centre. Arrows pick the plane, Down = perpendicular to an edge. Type the sides first.",
@@ -39,7 +53,7 @@ HINTS: dict = {
     "pie": ("Click the centre.", "Click the start of the wedge, then its end; or type the angle."),
     "pushpull": ("Click a face and move. Ctrl keeps the starting face.",
                  "Move, or type the distance and Enter. Double-click repeats the last."),
-    "move": ("Click what to move (or select it first). Arrows lock an axis.",
+    "move": ("Click what to move (or select it first). Red + on a group = rotate it.",
              "Click the destination, or type the distance and Enter."),
     "rotate": ("Click the centre of rotation — on a face, the protractor takes its plane.",
                "Click the start of the angle, then the end; or type the degrees."),
@@ -56,7 +70,7 @@ HINTS: dict = {
     },
     # Short on purpose: the Ctrl clause these two now carry says what they
     # leave behind, so repeating "to pull a guide" here only ate the room
-    # and got the line elided (Marco, 2026-09-17). SketchUp's own is just
+    # and got the line elided (Marco, 2026-09-17). The classic hint is just
     # as terse — «Haz clic en un elemento que desees medir.» — with the
     # modifiers as their own clauses after it.
     "tape": ("Click a point or an edge to measure. Arrows lock an axis.",
@@ -77,11 +91,12 @@ HINTS: dict = {
     "image": "Click the first corner of the image, then the opposite one. Shift frees the aspect.",
     "paste": "Click where the copy goes. Arrows lock an axis.",
     "place_group": "Click where the component goes.",
-    # SketchUp's walkthrough, its own words read off its status bar
-    # (Marco's recording, 2026-09-18), trimmed to the bar's budget.
+    # The classic walkthrough hint (Marco's recording, 2026-09-18),
+    # trimmed to the bar's budget.
     "position_camera": "Click where to stand, or drag toward what to look at. Type the eye height.",
     "look_around": "Drag to turn the camera. Type the eye height.",
     "walk": "Click and drag to walk. Ctrl = run, Shift = up/down or sideways, Alt = through walls.",
+    "first_person": "W/A/S/D = walk, Q/E = down/up, drag = look. Shift = run, Alt = through walls.",
 }
 
 NAV_HINTS: dict = {
@@ -108,13 +123,13 @@ def phase_of(key: str, tool) -> str:
     return "idle"
 
 
-#: What each linear-inference mode reads as in the hint, SketchUp's way of
-#: saying it: its own status bar carries «Alt = Activar/desactivar
+#: What each linear-inference mode reads as in the hint, the classic way of
+#: saying it: the usual status bar carries «Alt = Activar/desactivar
 #: "Inferencias lineales" (Ninguno activo)» while a line is being drawn —
 #: the offer AND the current state, right where the hand is looking.
 #:
 #: Ours says «inferences», not «linear inferences», and names the state in
-#: a word: SketchUp has the whole bar for this line and we have half of it
+#: a word: the classic bar spends a whole line on this and we have half of it
 #: (MESSAGE_SHARE), so the full name spent 52 characters of a 110-character
 #: budget and got the end of the hint elided. The long name still shows
 #: where it is not competing for room — Viewport._draw_linear_mode_label
@@ -138,7 +153,7 @@ def alt_inference_hint(mode: str | None) -> str:
 def hint_for(key: str | None, tool, nav_mode: str | None = None,
              linear_mode: str | None = None) -> str:
     """The one line the status bar shows now. With ``linear_mode`` and a
-    tool mid-operation, the Alt offer is appended the way SketchUp does."""
+    tool mid-operation, the Alt offer is appended, the classic way."""
     if nav_mode is not None and nav_mode in NAV_HINTS:
         return tr(NAV_HINTS[nav_mode])
     entry = HINTS.get(key or "")
@@ -159,11 +174,11 @@ def hint_for(key: str | None, tool, nav_mode: str | None = None,
 def _with_alt(text: str, key, tool, linear_mode) -> str:
     """Append the tool's own clause, then the Alt one.
 
-    The tool's stays up the whole time it is active (SketchUp keeps its
-    modifiers on screen); Alt's only appears mid-operation, because that is
+    The tool's stays up the whole time it is active (the classic bar keeps
+    its modifiers on screen); Alt's only appears mid-operation, because that is
     the only time the key does anything (issue #26)."""
     # One modifier at a time, each in the phase where it does something —
-    # SketchUp's own line carries «Ctrl = …» before the first click and
+    # the classic line carries «Ctrl = …» before the first click and
     # «Alt = …» once a line is under way, never both. Stacking them made
     # the bar elide (Marco, 2026-09-17: «no sale completo el texto»).
     if phase_of(key, tool) == "idle":

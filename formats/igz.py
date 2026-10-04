@@ -41,6 +41,7 @@ ZIP magic, so both shapes open transparently.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from core.version import __version__
@@ -214,7 +215,7 @@ def _face_json(f) -> dict:
     if opacity is not None:
         entry["opacity"] = float(opacity)
     if getattr(f, "attrs", {}).get("hidden"):
-        entry["hidden"] = True          # SketchUp's Hide on a face
+        entry["hidden"] = True          # Hide on a face
     # Material identity (core.materials): the registry name this face was
     # painted with. Written only when present; older readers ignore it.
     mat = getattr(f, "attrs", {}).get("mat")
@@ -228,7 +229,7 @@ def _face_json(f) -> dict:
                          for k, v in back.items()}
     elif back is True:
         # A two-sided face: the back mirrors the front (what the mesh
-        # formats describe, and what a SketchUp face painted the same on
+        # formats describe, and what a .skp face painted the same on
         # both sides becomes). Absent = the style's default back.
         entry["back"] = True
     return entry
@@ -281,6 +282,11 @@ def save_scene(scene, path: Path) -> dict:
                     protos[idx] = _mesh_json(g.mesh)
                 entry = {"proto": idx,
                          "xform": [float(x) for x in xf.data()]}
+                # Group or component (issue #90): a group of groups and a
+                # copied group carry a matrix too. Written for EVERY
+                # instance — a file without the key is an older one, which
+                # the reader tells apart its own way. Older readers ignore it.
+                entry["component"] = bool(getattr(g, "component", True))
             else:
                 entry = _mesh_json(g.mesh)
             # The name — never written until 2026-09-11, so every reopened
@@ -288,6 +294,11 @@ def save_scene(scene, path: Path) -> dict:
             # "Group 7". Older readers ignore the key.
             if getattr(g, "name", None):
                 entry["name"] = g.name
+            axes = getattr(g, "axes", None)
+            if axes is not None:
+                # A classic group's own axes (issue #44), column-major like
+                # "xform"; older readers ignore the key.
+                entry["axes"] = [float(x) for x in axes.data()]
             if getattr(g, "layer", None) is not None:
                 entry["layer"] = g.layer
             if getattr(g, "ifc", None):
@@ -304,11 +315,23 @@ def save_scene(scene, path: Path) -> dict:
                 # A 3D text keeps what it was made from, so it reopens
                 # editable. Older readers ignore the key.
                 entry["text3d"] = dict(g.text3d)
+            if getattr(g, "ext", None):
+                # Extensions' parameters for this container (JSON-safe by
+                # contract); older readers ignore the key.
+                entry["ext"] = json.loads(json.dumps(g.ext, default=str))
             if getattr(g, "uid", None):
                 # The identity a scene's hidden-object list names.
                 entry["uid"] = g.uid
             if getattr(g, "hidden", False):
                 entry["hidden"] = True
+            if getattr(g, "exploded", None):
+                # An exploded view and each part's share of it, so the
+                # document reopens able to reassemble (core/explode.py).
+                # Older readers ignore both and see the parts where they
+                # stand.
+                entry["exploded"] = dict(g.exploded)
+            if getattr(g, "explode_offset", None):
+                entry["explode_offset"] = list(g.explode_offset)
             kids = getattr(g, "children", None)
             if kids:
                 entry["children"] = [_entry(c) for c in kids]
@@ -350,6 +373,19 @@ def save_scene(scene, path: Path) -> dict:
     units = getattr(scene, "units", None)
     if isinstance(units, dict) and units != {"length": "m", "precision": 2}:
         payload["units"] = dict(units)     # only when not the metre default
+    pdata = getattr(scene, "plugin_data", None)
+    if pdata:
+        # Extensions' data: JSON-safe by contract; a value that is not is
+        # dropped with its key rather than breaking the save.
+        import json as _json
+        keep = {}
+        for key, value in pdata.items():
+            try:
+                keep[str(key)] = _json.loads(_json.dumps(value))
+            except (TypeError, ValueError):
+                continue
+        if keep:
+            payload["plugin_data"] = keep
     scales = getattr(scene, "custom_scales", None)
     if scales:
         payload["custom_scales"] = [float(n) for n in scales]
@@ -431,12 +467,49 @@ def save_scene(scene, path: Path) -> dict:
         "app_version": __version__,
         "scene": payload,
     }
-    doc = json.dumps(data, indent=2)
+    try:
+        doc = json.dumps(data, indent=2, allow_nan=False)
+    except ValueError:
+        # A NaN or an infinity in a coordinate (#185). Python would write
+        # it as the bare word NaN — not JSON, and a broken shape for good.
+        # Refuse, and leave the file on disk as it was.
+        raise NonFiniteDocumentError(_non_finite_where(payload)) from None
     if blobs:
         _write_container(path, doc, blobs)
     else:
         _write_atomic(path, doc.encode("utf-8"))
     return {"embedded": len(blobs), "missing": missing}
+
+
+class NonFiniteDocumentError(ValueError):
+    """The document holds a coordinate that is not a number; it is not
+    written, so the file on disk keeps its last good version."""
+
+    def __init__(self, where: str) -> None:
+        from core.i18n import tr
+        self.where = where
+        super().__init__(tr(
+            "The model has a point with invalid coordinates (not a number), "
+            "so it was not saved and the file on disk keeps its last good "
+            "version. Undo the last step and save again. Where: {where}",
+            where=where))
+
+
+def _non_finite_where(node, path: str = "scene") -> str:
+    """The first place in the payload holding a NaN or an infinity."""
+    import math as _math
+    stack = [(node, path)]
+    while stack:
+        cur, here = stack.pop()
+        if isinstance(cur, float) and not _math.isfinite(cur):
+            return here
+        if isinstance(cur, dict):
+            stack.extend((v, f"{here} › {k}") for k, v in
+                         reversed(list(cur.items())))
+        elif isinstance(cur, (list, tuple)):
+            stack.extend((v, f"{here}[{i}]") for i, v in
+                         reversed(list(enumerate(cur))))
+    return path
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -475,11 +548,12 @@ def _read_document(path: Path):
     embedded images."""
     raw = path.read_bytes()
     if not raw.startswith(_ZIP_MAGIC):
-        return json.loads(raw.decode("utf-8")), None
+        return json.loads(raw.decode("utf-8"), parse_constant=_note_constant), None
     import zipfile
     archive = zipfile.ZipFile(path)
     try:
-        data = json.loads(archive.read(_DOC_ENTRY).decode("utf-8"))
+        data = json.loads(archive.read(_DOC_ENTRY).decode("utf-8"),
+                          parse_constant=_note_constant)
     except KeyError:
         archive.close()
         raise ValueError(
@@ -522,10 +596,54 @@ def load_into(scene, path: Path, progress=None) -> None:
             gc.enable()
 
 
+#: Entities left out of the document being opened because a coordinate
+#: is not a number (NaN / inf) — counted per load, reported on the scene.
+_dropped_nonfinite = [0]
+#: Whether the document text holds any NaN / Infinity at all. The JSON
+#: parser reports them as it reads (``parse_constant``), so a clean
+#: document — nearly every one — skips the per-coordinate check entirely.
+_saw_nonfinite = [False]
+
+
+def _note_constant(token: str) -> float:
+    _saw_nonfinite[0] = True
+    return float(token)
+
+
+def _finite_points(*points) -> bool:
+    try:
+        return all(math.isfinite(float(c)) for p in points for c in p)
+    except (TypeError, ValueError):
+        return False
+
+
+def _without_nonfinite(payload: dict) -> dict:
+    """The mesh block minus the edges and faces with a NaN or infinite
+    coordinate. One such corner made the WHOLE document unopenable
+    («cannot convert float NaN to integer», #185): the rest of the model
+    opens, the damaged pieces are left out and counted."""
+    if not _saw_nonfinite[0]:
+        return payload
+    edges = [r for r in payload.get("edges", [])
+             if _finite_points(r.get("a", ()), r.get("b", ()))]
+    faces = [r for r in payload.get("faces", [])
+             if _finite_points(*r.get("vertices", ()),
+                               *(p for h in r.get("holes", []) for p in h))]
+    dropped = (len(payload.get("edges", [])) - len(edges)
+               + len(payload.get("faces", [])) - len(faces))
+    if not dropped:
+        return payload
+    _dropped_nonfinite[0] += dropped
+    return dict(payload, edges=edges, faces=faces)
+
+
 def _load_into_inner(scene, path: Path, progress=None) -> None:
     def tick(frac, text):
         if progress is not None:
             progress(frac, text)
+
+    _dropped_nonfinite[0] = 0
+    _saw_nonfinite[0] = False
 
     tick(0.05, "Reading the document…")
     data, archive = _read_document(path)
@@ -614,6 +732,11 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
         else:
             group = Group(name=name)
             _load_mesh(group.mesh, raw)
+        if isinstance(raw.get("axes"), list) and len(raw["axes"]) == 16:
+            from PySide6.QtGui import QMatrix4x4
+            vals = [float(x) for x in raw["axes"]]
+            group.axes = QMatrix4x4(*[vals[col * 4 + row] for row in range(4)
+                                      for col in range(4)])
         if raw.get("layer"):
             group.layer = raw["layer"]
         if raw.get("ifc"):
@@ -622,15 +745,30 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
             group.billboard = raw["billboard"]   # True | "mesh"
         if isinstance(raw.get("text3d"), dict):
             group.text3d = dict(raw["text3d"])
+        if isinstance(raw.get("ext"), dict):
+            group.ext = raw["ext"]
         if raw.get("uid"):
             group.uid = str(raw["uid"])   # older documents keep the fresh one
         if raw.get("hidden"):
             group.hidden = True
         if isinstance(raw.get("material"), dict):
             group.material = dict(raw["material"])
+        if isinstance(raw.get("exploded"), dict):
+            group.exploded = dict(raw["exploded"])
+        off = raw.get("explode_offset")
+        if isinstance(off, list) and len(off) == 3:
+            group.explode_offset = tuple(float(v) for v in off)
         if depth < 32:              # a corrupt document must not spin
             group.adopt(_group_from(c, depth + 1)
                         for c in raw.get("children", []) or [])
+        if "component" in raw:
+            group.component = bool(raw["component"])
+        elif any(isinstance(c, dict) and "xform" not in c
+                 for c in raw.get("children", []) or []):
+            # Saved before the key existed (issue #90): a container holding
+            # a CLASSIC group can only be Make Group's — a .skp import
+            # places every child with a matrix. A group, then.
+            group.component = False
         return group
 
     raw_groups = payload.get("groups", []) or []
@@ -660,6 +798,8 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     scene.camera_home = dict(cam) if isinstance(cam, dict) else None
     from core.units import model_units_of
     scene.units = model_units_of(payload)   # validated; absent = metres
+    pdata = payload.get("plugin_data")
+    scene.plugin_data = dict(pdata) if isinstance(pdata, dict) else {}
     scales = payload.get("custom_scales")
     if isinstance(scales, list):
         scene.custom_scales = [float(n) for n in scales
@@ -687,7 +827,7 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
         from core.section import SectionPlane
         scene.section_planes = [SectionPlane.from_dict(r)
                                 for r in raw_planes]
-        # One active cut max (SketchUp): keep the FIRST marked active.
+        # One active cut max: keep the FIRST marked active.
         seen_active = False
         for sp in scene.section_planes:
             if sp.active and seen_active:
@@ -720,7 +860,15 @@ def _load_into_inner(scene, path: Path, progress=None) -> None:
     from core.guide import Guide
     scene.guides.clear()
     for raw in payload.get("guides", []):
+        # A guide at (nan, nan, nan) stalled every tool (#185): left out.
+        if not _finite_points(raw.get("point", ()),
+                              raw.get("direction") or (),
+                              raw.get("origin") or ()):
+            _dropped_nonfinite[0] += 1
+            continue
         scene.guides.append(Guide.from_dict(raw))
+    # What had to be left out, for the window to say so.
+    scene.load_repairs = _dropped_nonfinite[0]
 
     from core.image_plane import ImagePlane
     scene.image_planes.clear()
@@ -796,6 +944,7 @@ def _load_mesh(mesh, payload) -> None:
     import core.mesh as _mesh_mod
     from core.topology import _maximal_holes
 
+    payload = _without_nonfinite(payload)
     raw_edges = payload.get("edges", [])
     raw_faces = payload.get("faces", [])
     if len(raw_edges) + len(raw_faces) * 4 < 1024:   # ~corner estimate

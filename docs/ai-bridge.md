@@ -8,10 +8,12 @@ revierte entero; el guard de hermeticidad valida sus recetas).
 
 ## Uso
 
-1. En IngeTrazo: **Extensiones ▸ Puente IA (MCP)** — arranca un servidor
-   local (solo 127.0.0.1, puerto 4763; `INGETRAZO_AI_PORT` lo cambia).
-   El mismo menú lo detiene.
-2. Al encenderlo, IngeTrazo abre una ventana con las líneas exactas para
+1. En IngeTrazo: pestaña **IA** de la barra lateral ▸ sección **Puente IA
+   (MCP)** ▸ **Encender puente** (o **Extensiones ▸ Puente IA (MCP)**, que
+   abre esa sección y lo enciende) — arranca un servidor local (solo
+   127.0.0.1, puerto 4763; `INGETRAZO_AI_PORT` lo cambia). **Detener
+   puente** lo apaga.
+2. Al encenderlo, la sección muestra, con un botón Copiar, las líneas exactas para
    tu sistema (botón **Copiar**). No hace falta tener Python instalado: el
    paquete lleva el servidor MCP.
 
@@ -40,11 +42,31 @@ revierte entero; el guard de hermeticidad valida sus recetas).
        }
 
    Si Claude no responde: comprueba que IngeTrazo sigue abierto con el
-   puente encendido (Extensiones ▸ Puente IA (MCP) muestra «listening»),
+   puente encendido (la sección Puente IA (MCP) dice «Escuchando en…»),
    que la ruta del comando existe, y en Claude Desktop que el servidor
    aparece en Configuración ▸ Desarrollador ▸ MCP sin error.
 3. Pídele cosas: *"dibuja una casita de 6×4 m con techo a dos aguas,
    agrúpala y píntala de ladrillo; muéstrame cómo quedó"*.
+
+### El agente dentro de un contenedor (Docker, WSL2)
+
+El puente escucha **solo en `127.0.0.1`** de la máquina donde corre
+IngeTrazo, y así se queda: no tiene contraseña y `run_python` ejecuta
+código dentro de la aplicación, de modo que abrirlo a la red dejaría el
+modelo (y el equipo) a merced de cualquiera en ella.
+
+- **IngeTrazo dentro de WSL2** (AppImage o `.tar.gz` con WSLg) y el
+  contenedor con `--network host`: funciona tal cual, porque comparten
+  `127.0.0.1`.
+- **En cualquier otro caso**, lleva el puerto hasta el agente con un túnel
+  que tú controlas (`ssh -L 4763:127.0.0.1:4763 usuario@equipo`, `socat`…)
+  y dile al cliente MCP dónde está el otro extremo:
+
+      INGETRAZO_AI_HOST=host.docker.internal INGETRAZO_AI_PORT=4763 \
+          python3 /ruta/a/app/scripts/ingetrazo_mcp.py
+
+  `INGETRAZO_AI_HOST` (por defecto `127.0.0.1`) solo cambia a dónde se
+  conecta el cliente; el puente no deja de escuchar únicamente en local.
 
 ## Herramientas expuestas
 
@@ -61,8 +83,9 @@ de localhost.
 
 ## Asistente IA (dentro de la app)
 
-Para el usuario que no usa Claude Code: **Extensiones ▸ Asistente IA**
-(Ctrl+Shift+A) abre un chat DENTRO de IngeTrazo. Pega tu clave API — el
+Para el usuario que no usa Claude Code: la pestaña **IA** de la barra
+lateral (Ctrl+Shift+A la trae al frente, aunque esté oculta) es un chat
+DENTRO de IngeTrazo. Pega tu clave API — el
 proveedor se detecta solo por el prefijo, la convención de IngePresupuestos:
 
 | Prefijo | Proveedor | Modelo por defecto |

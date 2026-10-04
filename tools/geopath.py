@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """GeoPath tool: trace a terrain/road path over the base map (Track G).
 
-Draws with the familiar SketchUp feel — click nodes, rubber-band preview, type a
+Draws with the familiar push/pull feel — click nodes, rubber-band preview, type a
 segment length in the VCB — but the result is a :class:`~georef.geopath.GeoPath`
 in ``scene.geo_paths``, **never** mesh geometry. It stays on the Z=0 ground
 plane (the flat base map); the modelling topology engine is untouched.
@@ -29,7 +29,10 @@ _NODE_PX = 9    # grab an existing node within this pixel radius
 
 class GeoPathTool(Tool):
     name = "Path"
-    shortcut = "Y"   # T went to Tape Measure (SketchUp's key for it)
+    shortcut = "Y"   # T went to Tape Measure (the usual key for it)
+    description = (
+        "Trace a path over the base map — a road, a boundary — to "
+        "profile or measure it; the model is left untouched.")
     vcb_label = "Length"
     uses_snap = False  # a georef trace snaps to nothing in the modelling mesh
 
@@ -207,8 +210,9 @@ class GeoPathTool(Tool):
             return (fmt_len(run) + "  ·  " + fmt_len(elevation), mid)
         rise = elevation - start_z
         grade = rise / run * 100.0
-        return (f"{run:.2f} m  ·  {elevation:.2f} m  ·  {rise:+.2f} m ({grade:+.1f}%)",
-                mid)
+        sign = "+" if rise >= 0 else ""
+        return (f"{fmt_len(run)}  ·  {fmt_len(elevation)}  ·  "
+                f"{sign}{fmt_len(rise)} ({grade:+.1f}%)", mid)
 
     # ---- Internals ----------------------------------------------------------
     def _pick_node(self, ctx: ToolContext):

@@ -51,10 +51,11 @@ def test_every_registered_tool_has_a_hint():
     missing = [k for k in win._tools if k not in HINTS and not k.startswith("plugin_")]
     assert not missing, missing
     win._activate_tool("line")
-    assert win.status_hint.startswith("Click the start point")
-    assert win.statusBar().currentMessage().startswith("Click the start point")
+    # The tool's name leads its hint (it used to sit apart on the right).
+    assert win.status_hint.startswith("Line — Click the start point")
+    assert win.statusBar().currentMessage().startswith("Line — Click the start point")
     win._activate_nav("orbit")
-    assert win.status_hint.startswith("Drag to orbit")
+    assert win.status_hint.startswith("Orbit — Drag to orbit")
     # The Model | Sheet strip stays first: no normal widget was added left of it.
     from views.sheet_tabs import SheetTabs
     bar = win.statusBar()
@@ -67,11 +68,11 @@ def test_every_registered_tool_has_a_hint():
     win.viewport.flash_status("Guide at 2.2 m", 50)
     assert bar.currentMessage().startswith("Guide at")
     bar._restore()
-    assert bar.currentMessage().startswith("Drag to orbit")
+    assert bar.currentMessage().startswith("Orbit — Drag to orbit")
     win.close()
 
 
-def test_the_message_keeps_to_the_left_half_of_the_bar():
+def test_the_message_keeps_to_its_share_of_the_bar():
     from PySide6.QtWidgets import QApplication
     import pytest
     app = QApplication.instance()
@@ -84,7 +85,7 @@ def test_the_message_keeps_to_the_left_half_of_the_bar():
     bar.show()
     bar.resize(1600, 28)
     app.processEvents()
-    assert bar._msg.maximumWidth() == 800
+    assert bar._msg.maximumWidth() == int(1600 * bar.MESSAGE_SHARE)
     bar.showMessage("Select objects.")
     app.processEvents()
     assert bar._msg.x() < 200                   # glued to the left, after the strip

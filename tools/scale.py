@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""Scale tool (S) — SketchUp's grip box, built from the official doc
-("Scaling Your Model or Parts of Your Model", help.sketchup.com).
+"""Scale tool (S) — the classic grip box.
 
-The rhythm SketchUp documents:
+The rhythm:
 
 - Activating with a selection wraps it in a **yellow box with green grips**
   (26 on a 3D box: 8 corners + 12 edge midpoints + 6 face centres; 8 on a
@@ -20,21 +19,25 @@ The rhythm SketchUp documents:
   Official doc words them as taps that "toggle this functionality".
 - The Measurements box takes a **plain number as a factor** ("2" doubles),
   **per-axis factors** separated by ``;`` (our locale's field separator),
-  a **negative factor to mirror** through the anchor (SketchUp: type -1, or
+  a **negative factor to mirror** through the anchor (type -1, or
   drag a grip past its anchor), and a **number with a unit suffix as the
   new absolute size** of the grip's first axis ("2m" makes that side 2 m).
   Right after committing, typing + Enter redoes the scale at the new value
   (the hot-retype window Rotate already has).
 
-DEFERRED (documented, not built): the box aligned to a component's own
-axes (today it is world-aligned), and the Tape Measure whole-model rescale.
+The box sits on the object's OWN axes when a single group or component is
+selected (issue #44), and on the drawing axes otherwise — the
+world's at the top level, the open group's inside it. It is kept in that
+frame's coordinates (``_lo``/``_hi``), mapped to the world to draw and pick.
+
+DEFERRED (documented, not built): the Tape Measure whole-model rescale.
 """
 from __future__ import annotations
 
 import itertools
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QVector3D
+from PySide6.QtGui import QMatrix4x4, QVector3D
 
 from core.history import (CompoundCommand, ScaleGroupCommand,
                           ScaleVerticesCommand, scale_matrix)
@@ -44,7 +47,7 @@ from tools.move import gather_images, gather_targets
 
 _MIN_FACTOR = 1e-4
 # Below this extent an axis is flat: it gets no grips and never scales
-# (a 2D face shows SketchUp's 8-grip box instead of a degenerate 26).
+# (a 2D face shows the 8-grip box instead of a degenerate 26).
 _FLAT = 1e-6
 _AXIS_NAMES = ("Red", "Green", "Blue")     # X east, Y north, Z up (Z-up)
 
@@ -68,16 +71,29 @@ class _Grip:
 class ScaleTool(Tool):
     name = "Scale"
     shortcut = "S"
+    description = (
+        "Resize the selection by dragging the grips of its box; the "
+        "corners keep its proportions.")
     vcb_label = "Scale"
-    uses_snap = False                      # grips, not geometry, take the click
+    @property
+    def uses_snap(self) -> bool:
+        """Only while a grip is held: then a corner, a midpoint or an edge
+        of ANOTHER object sets the size — scale «to» it (issue #233,
+        @ales-limon). Before the grab, the grips take the click, not the
+        geometry."""
+        return self._grip is not None
+
     # The VCB tags unit-suffixed entries for us ("2m" = absolute size), so a
-    # bare "2" can mean ×2 the way SketchUp reads it.
+    # bare "2" can mean ×2, the usual reading.
     accepts_absolute_length = True
 
     def __init__(self) -> None:
-        # Box + grips (world-axis aligned, over the current selection).
+        # Box + grips, in the coordinates of the box's frame (see
+        # ``_pick_frame``): the world's unless the selection has its own.
         self._lo: QVector3D | None = None
         self._hi: QVector3D | None = None
+        self._axes = None                  # (red, green, blue) or None = world
+        self._orig = None
         self._grips: list[_Grip] = []
         self._box_version = -1
         # Targets resolved at grab time.
@@ -92,7 +108,7 @@ class ScaleTool(Tool):
         self._factors = (1.0, 1.0, 1.0)    # live preview factors
         self._grabbed_px = None            # screen pos at grab (drag detect)
         self._moved = False
-        # SketchUp's tap toggles.
+        # A tap toggles.
         self.about_center = False
         self.uniform = False
         # Hot retype window (same mechanism as Rotate).
@@ -119,6 +135,7 @@ class ScaleTool(Tool):
         from core.image_plane import ImagePlane
         from core.mesh import Edge, Face
 
+        self._pick_frame(viewport)
         lo = [float("inf")] * 3
         hi = [float("-inf")] * 3
         seen = False
@@ -126,6 +143,7 @@ class ScaleTool(Tool):
         def absorb(p: QVector3D) -> None:
             nonlocal seen
             seen = True
+            p = self._to_local(p)
             for i, c in enumerate((p.x(), p.y(), p.z())):
                 if c < lo[i]:
                     lo[i] = c
@@ -186,18 +204,56 @@ class ScaleTool(Tool):
         ext = self._extents()
         return sum(1 for i in range(3) if ext[i] > _FLAT)
 
+    # ---- The box's frame (issue #44) ----------------------------------------
+    def _pick_frame(self, viewport) -> None:
+        """One group or component selected: its own axes. Anything else:
+        the drawing axes. The world frame is kept as ``None`` so every
+        number is exactly what it was before the box could turn."""
+        from core import axes
+        from core.group import Group, frame_axes, group_frame
+        sel = list(viewport.scene.selection)
+        frame = None
+        if len(sel) == 1 and isinstance(sel[0], Group):
+            frame = group_frame(sel[0])
+        if frame is None and not axes.is_world():
+            frame = axes.frame_matrix(axes.ORIGIN, *[axes.AXES[k]
+                                                     for k in "xyz"])
+        if frame is None:
+            self._axes, self._orig = None, None
+            return
+        o, x, y, z = frame_axes(frame)
+        if (x, y, z) == (QVector3D(1, 0, 0), QVector3D(0, 1, 0),
+                         QVector3D(0, 0, 1)):
+            self._axes, self._orig = None, None
+            return
+        self._axes, self._orig = (x, y, z), o
+
+    def _to_local(self, p: QVector3D) -> QVector3D:
+        if self._axes is None:
+            return QVector3D(p)
+        d = p - self._orig
+        x, y, z = self._axes
+        return QVector3D(QVector3D.dotProduct(d, x), QVector3D.dotProduct(d, y),
+                         QVector3D.dotProduct(d, z))
+
+    def _to_world(self, p: QVector3D) -> QVector3D:
+        if self._axes is None:
+            return QVector3D(p)
+        x, y, z = self._axes
+        return self._orig + x * p.x() + y * p.y() + z * p.z()
+
     def _grip_pos(self, grip: _Grip) -> QVector3D:
         lo, hi = self._lo, self._hi
         t = grip.params
-        return QVector3D(lo.x() + (hi.x() - lo.x()) * t[0],
-                         lo.y() + (hi.y() - lo.y()) * t[1],
-                         lo.z() + (hi.z() - lo.z()) * t[2])
+        return self._to_world(QVector3D(lo.x() + (hi.x() - lo.x()) * t[0],
+                                        lo.y() + (hi.y() - lo.y()) * t[1],
+                                        lo.z() + (hi.z() - lo.z()) * t[2]))
 
     def _anchor_for(self, grip: _Grip) -> QVector3D:
-        """SketchUp: the point straight opposite the grip — or the box centre
+        """The point straight opposite the grip — or the box centre
         while About Center is toggled on."""
         if self.about_center:
-            return (self._lo + self._hi) * 0.5
+            return self._to_world((self._lo + self._hi) * 0.5)
         params = tuple(1.0 - t if i in grip.mask else 0.5
                        for i, t in enumerate(grip.params))
         return self._grip_pos(_Grip(params, grip.mask))
@@ -231,6 +287,66 @@ class ScaleTool(Tool):
         s = (e - b * d0) / denom
         return a + u * s
 
+    #: What a held grip may land on: named points and edges, projected onto
+    #: the grip's line. Not a face (the grip would jump across every
+    #: surface it passes) and not the engine's own directional inferences.
+    _TARGET_KINDS = frozenset({
+        "endpoint", "midpoint", "intersection", "center", "origin",
+        "on_edge", "on_line", "from_point", "close", "guide",
+        "component_origin", "arc_midpoint"})
+
+    def snap_excluded(self):
+        """What is being scaled stays out of the snap engine, or the grip
+        would land on the very geometry it resizes. ``(edge ids, group
+        ids)`` as Move gives it."""
+        if self._grip is None:
+            return None
+        edges = {id(e) for v in self._verts for e in getattr(v, "edges", ())}
+        return edges, {id(g) for g in self._groups}
+
+    def _snapped_point(self, ctx):
+        snap = getattr(ctx, "snap", None) if ctx is not None else None
+        if snap is None or snap.kind not in self._TARGET_KINDS:
+            return None
+        return QVector3D(snap.point)
+
+    def _factors_from_point(self, p: QVector3D):
+        """The factors that put the held grip level with world point ``p``:
+        ``p`` projected onto the anchor→grip line (one axis, or a corner /
+        Shift), or per axis for an edge grip."""
+        grip, anchor = self._grip, self._anchor
+        g0 = self._grip_pos(grip)
+        uniform = self.uniform or grip.kind(self._active_axes()) == "corner"
+        if uniform or len(grip.mask) == 1:
+            axis_dir = g0 - anchor
+            length = axis_dir.length()
+            if length < 1e-12:
+                return None
+            f = QVector3D.dotProduct(p - anchor, axis_dir) / (length * length)
+            if uniform:
+                ext = self._extents()
+                return tuple(f if ext[i] > _FLAT else 1.0 for i in range(3))
+            factors = [1.0, 1.0, 1.0]
+            factors[grip.mask[0]] = f
+            return tuple(factors)
+        gl = self._to_local(g0) - self._to_local(anchor)
+        pl = self._to_local(p) - self._to_local(anchor)
+        factors = [1.0, 1.0, 1.0]
+        for i in grip.mask:
+            ga = (gl.x(), gl.y(), gl.z())[i]
+            if abs(ga) < 1e-12:
+                return None
+            factors[i] = (pl.x(), pl.y(), pl.z())[i] / ga
+        return tuple(factors)
+
+    def _factors_for(self, ctx, viewport, sx: float, sy: float):
+        p = self._snapped_point(ctx)
+        if p is not None:
+            got = self._factors_from_point(p)
+            if got is not None:
+                return got
+        return self._factors_from_cursor(viewport, sx, sy)
+
     def _factors_from_cursor(self, viewport, sx: float, sy: float):
         grip, anchor = self._grip, self._anchor
         g0 = self._grip_pos(grip)
@@ -240,7 +356,7 @@ class ScaleTool(Tool):
         uniform = self.uniform or grip.kind(self._active_axes()) == "corner"
         if uniform or len(grip.mask) == 1:
             # Cursor tracked along the anchor→grip line; crossing the anchor
-            # flips the factor negative — SketchUp's drag-past-zero mirror.
+            # flips the factor negative — the drag-past-zero mirror.
             axis_dir = g0 - anchor
             length = axis_dir.length()
             if length < 1e-12:
@@ -258,7 +374,11 @@ class ScaleTool(Tool):
             return tuple(factors)
         # Two axes (edge midpoint): track on the grip's own box plane.
         normal_axis = next(i for i in range(3) if i not in grip.mask)
-        n = QVector3D(*[1.0 if i == normal_axis else 0.0 for i in range(3)])
+        if self._axes is None:
+            n = QVector3D(*[1.0 if i == normal_axis else 0.0
+                            for i in range(3)])
+        else:
+            n = QVector3D(self._axes[normal_axis])
         denom = QVector3D.dotProduct(n, d)
         if abs(denom) < 1e-9:
             return None
@@ -267,6 +387,15 @@ class ScaleTool(Tool):
             return None
         p = o + d * t
         factors = [1.0, 1.0, 1.0]
+        if self._axes is not None:
+            gl = self._to_local(g0) - self._to_local(anchor)
+            pl = self._to_local(p) - self._to_local(anchor)
+            for i in grip.mask:
+                ga = (gl.x(), gl.y(), gl.z())[i]
+                if abs(ga) < 1e-12:
+                    return None
+                factors[i] = (pl.x(), pl.y(), pl.z())[i] / ga
+            return tuple(factors)
         for i in grip.mask:
             ga = [g0.x(), g0.y(), g0.z()][i] - [anchor.x(), anchor.y(),
                                                 anchor.z()][i]
@@ -285,7 +414,7 @@ class ScaleTool(Tool):
         sx, sy = ctx.screen.x(), ctx.screen.y()
 
         if self._grip is not None:         # second click commits
-            factors = self._factors_from_cursor(viewport, sx, sy)
+            factors = self._factors_for(ctx, viewport, sx, sy)
             if factors is not None:
                 self._commit(viewport, factors)
             return
@@ -297,7 +426,7 @@ class ScaleTool(Tool):
                 return
 
         # No grip hit: with nothing selected, a click picks the entity under
-        # the cursor and boxes it (SketchUp's click-to-scale).
+        # the cursor and boxes it (click-to-scale).
         if not viewport.scene.selection:
             groups, positions = gather_targets(ctx)
             images = gather_images(ctx)
@@ -339,6 +468,7 @@ class ScaleTool(Tool):
         self._grip = grip
         self._anchor = self._anchor_for(grip)
         self._factors = (1.0, 1.0, 1.0)
+        self._capture_originals(viewport)
         self._grabbed_px = screen_xy
         self._moved = False
         viewport.update()
@@ -354,7 +484,7 @@ class ScaleTool(Tool):
                 self._hover_grip = hover
                 viewport.update()
             return
-        factors = self._factors_from_cursor(viewport, sx, sy)
+        factors = self._factors_for(ctx, viewport, sx, sy)
         if factors is None:
             return
         if any(abs(f) < _MIN_FACTOR for f in factors):
@@ -368,7 +498,7 @@ class ScaleTool(Tool):
         viewport.update()
 
     def on_release(self, viewport) -> None:
-        """SketchUp accepts both rhythms: click-move-click AND drag-release.
+        """Both rhythms are accepted: click-move-click AND drag-release.
         A release after a real drag commits; a release in place leaves the
         operation live for the second click."""
         if self._grip is None or not self._moved:
@@ -405,6 +535,11 @@ class ScaleTool(Tool):
         self._apply_preview(viewport, current)
         viewport.update()
 
+    def value_is_unitless(self) -> bool:
+        """A bare number is a FACTOR, never a length (#176); one typed
+        with a unit is the new size and still converts."""
+        return True
+
     def on_value(self, viewport, value) -> bool:
         absolute = False
         if isinstance(value, tuple) and value and value[0] == "abs_len":
@@ -435,7 +570,7 @@ class ScaleTool(Tool):
         return False
 
     def _typed_factors(self, value, absolute: bool, spec=None):
-        """Map a typed value onto per-axis factors, SketchUp's reading:
+        """Map a typed value onto per-axis factors, the usual reading:
         one number = the grip's factor; ``a;b`` / ``a;b;c`` = one per axis of
         the grip; with a unit suffix the numbers are the new absolute sizes
         (metres) instead of factors."""
@@ -483,35 +618,64 @@ class ScaleTool(Tool):
         viewport.update()
 
     # ---- Live preview -------------------------------------------------------
-    def _scale_live(self, viewport, step: tuple) -> None:
-        if all(abs(f - 1.0) < 1e-12 for f in step):
-            return
-        m = scale_matrix(self._anchor, step)
+    def _capture_originals(self, viewport) -> None:
+        """Where everything that scales stood when the grip was taken. The
+        live preview is computed from THESE on every move — never as a step
+        from the previous frame. Chained steps drift in float32, and a drag
+        that went down to 0.04 and back ended with some vertices a hair off
+        their starting cell: the commit, which finds the vertices by their
+        starting positions, missed them, scaled the rest and tore the
+        faces (a user's video, 25-09: a rounded box shredded on release).
+        Measured: 300 moves of that kind, 194 of 1600 vertices lost."""
+        from PySide6.QtGui import QMatrix4x4
+        orig_v: list = []
+        orig_x: list = []
         for group in self._groups:
             if getattr(group, "xform", None) is not None:
-                group.xform = m * group.xform   # instance: O(1)
+                orig_x.append((group, QMatrix4x4(group.xform)))
             else:
                 gmesh = group.mesh
-                for vx in list(gmesh.vertices):
-                    gmesh.move_vertex(vx, m.map(vx.position) - vx.position)
-        for vx in self._verts:
-            viewport.scene.mesh.move_vertex(
-                vx, m.map(vx.position) - vx.position)
-        for im in self._images:
-            im.origin = m.map(im.origin)
-            im.u = m.mapVector(im.u)
-            im.v = m.mapVector(im.v)
+                orig_v.extend((gmesh, v, QVector3D(v.position))
+                              for v in gmesh.vertices)
+        mesh = viewport.scene.mesh
+        orig_v.extend((mesh, v, QVector3D(v.position)) for v in self._verts)
+        self._orig_v = orig_v
+        self._orig_x = orig_x
+        self._orig_im = [(im, QVector3D(im.origin), QVector3D(im.u),
+                          QVector3D(im.v)) for im in self._images]
+
+    def _set_preview(self, viewport, factors: tuple) -> None:
+        """Put everything at *factors* about the anchor, from the originals.
+        At (1, 1, 1) it is an exact restore: the starting positions go back
+        as they were stored, not through a matrix."""
+        if getattr(self, "_orig_v", None) is None:
+            return
+        identity = all(abs(f - 1.0) < 1e-12 for f in factors)
+        m = None if identity else scale_matrix(self._anchor, factors,
+                                               self._axes)
+        for mesh, v, p0 in self._orig_v:
+            target = p0 if m is None else m.map(p0)
+            mesh.move_vertex(v, target - v.position)
+        for group, x0 in self._orig_x:
+            group.xform = QMatrix4x4(x0) if m is None else m * x0
+        for im, o0, u0, v0 in self._orig_im:
+            if m is None:
+                im.origin, im.u, im.v = (QVector3D(o0), QVector3D(u0),
+                                         QVector3D(v0))
+            else:
+                im.origin, im.u, im.v = (m.map(o0), m.mapVector(u0),
+                                         m.mapVector(v0))
         viewport.scene.version += 1
 
     def _apply_preview(self, viewport, target: tuple) -> None:
-        step = tuple(t / f for t, f in zip(target, self._factors))
-        self._scale_live(viewport, step)
+        if all(abs(t - f) < 1e-12 for t, f in zip(target, self._factors)):
+            return
+        self._set_preview(viewport, target)
         self._factors = target
 
     def _revert_preview(self, viewport) -> None:
         if any(abs(f - 1.0) > 1e-12 for f in self._factors):
-            self._scale_live(
-                viewport, tuple(1.0 / f for f in self._factors))
+            self._set_preview(viewport, (1.0, 1.0, 1.0))
             self._factors = (1.0, 1.0, 1.0)
 
     # ---- Commit -------------------------------------------------------------
@@ -526,19 +690,22 @@ class ScaleTool(Tool):
         active = tuple(i for i in range(3) if ext[i] > _FLAT)
         spec = (uniform, mask, ext, active)
         anchor = QVector3D(self._anchor)
+        box_axes = self._axes
         groups = list(self._groups)
         positions = list(self._positions)
         images = list(self._images)
 
         def build(fs: tuple):
             packed = (fs[0] if fs[0] == fs[1] == fs[2] else fs)
-            cmds: list = [ScaleGroupCommand(g, anchor, packed)
+            cmds: list = [ScaleGroupCommand(g, anchor, packed, box_axes)
                           for g in groups]
             if positions:
-                cmds.append(ScaleVerticesCommand(positions, anchor, packed))
+                cmds.append(ScaleVerticesCommand(positions, anchor, packed,
+                                                 box_axes))
             if images:
                 from core.history import ScaleImagePlanesCommand
-                cmds.append(ScaleImagePlanesCommand(images, anchor, packed))
+                cmds.append(ScaleImagePlanesCommand(images, anchor, packed,
+                                                    box_axes))
             if not cmds:
                 return None
             return cmds[0] if len(cmds) == 1 else CompoundCommand(cmds)
@@ -548,11 +715,12 @@ class ScaleTool(Tool):
             cmd = build(factors)
             if cmd is not None:
                 viewport.history.execute(cmd)
-                # SketchUp: right after scaling, a typed value redoes it.
+                # Right after scaling, a typed value redoes it.
                 self._last = {"cmd": cmd, "build": build, "spec": spec}
         self._grip = None
         self._anchor = None
         self._factors = (1.0, 1.0, 1.0)
+        self._orig_v = None                 # the operation is over
         self._box_version = -1              # geometry moved: rebuild the box
         self._refresh_box(viewport)
         viewport.update()
@@ -568,13 +736,14 @@ class ScaleTool(Tool):
         self._positions = []
         self._verts = []
         self._images = []
+        self._orig_v = None
         self._box_version = -1
         self._grabbed_px = None
         self._moved = False
 
     # ---- Feedback -----------------------------------------------------------
     def vcb_caption(self) -> str:
-        """SketchUp captions the Measurements box by the axes in play."""
+        """Caption the Measurements box by the axes in play."""
         grip = self._grip or self._hover_grip
         if grip is None:
             return "Scale"
@@ -584,7 +753,7 @@ class ScaleTool(Tool):
         return f"{names} Scale"
 
     def value_label(self):
-        """The live factor readout beside the box, SketchUp-style: one number
+        """The live factor readout beside the box: one number
         for a uniform scale, one per axis otherwise."""
         if self._grip is None:
             return None
@@ -605,13 +774,13 @@ class ScaleTool(Tool):
         if self._lo is None:
             return None
         lo, hi = self._lo, self._hi
-        m = (scale_matrix(self._anchor, self._factors)
+        m = (scale_matrix(self._anchor, self._factors, self._axes)
              if self._grip is not None else None)
 
         def corner(tx, ty, tz):
-            p = QVector3D(lo.x() + (hi.x() - lo.x()) * tx,
-                          lo.y() + (hi.y() - lo.y()) * ty,
-                          lo.z() + (hi.z() - lo.z()) * tz)
+            p = self._to_world(QVector3D(lo.x() + (hi.x() - lo.x()) * tx,
+                                         lo.y() + (hi.y() - lo.y()) * ty,
+                                         lo.z() + (hi.z() - lo.z()) * tz))
             return m.map(p) if m is not None else p
 
         ext = self._extents()

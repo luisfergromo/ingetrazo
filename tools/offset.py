@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
 """Offset tool: offset a face's boundary in its plane (walls with thickness).
 
-SketchUp's Offset (F): pick a face, drag (or type a distance) and a parallel
+Offset (F): pick a face, drag (or type a distance) and a parallel
 loop appears offset from the boundary. The face splits into a ring (the wall
 footprint) and an inner face (the room), so the ring can then be pushed up into
 walls with thickness — the casita's first hito.
@@ -25,6 +25,7 @@ from core.i18n import tr
 from core.mesh import Edge, Face
 from core.offset import offset_chain, offset_regions
 from core.topology import max_offset_distance, offset_loop
+from core.units import fmt_len
 from tools.base import Tool, ToolContext
 
 
@@ -40,6 +41,9 @@ def _point_segment_distance(p: QVector3D, a: QVector3D, b: QVector3D) -> float:
 class OffsetTool(Tool):
     name = "Offset"
     shortcut = "F"
+    description = (
+        "Draw a copy of a face's outline at an even distance inside "
+        "or outside it — walls with thickness.")
     uses_snap = False  # picks a face; no snap markers
     vcb_label = "Offset"
     wireframe_color = (0.13, 0.17, 0.23, 1.0)
@@ -61,7 +65,7 @@ class OffsetTool(Tool):
         self._chain: bool = False
         self._closed: bool = True
         #: A run taken from the selection when the tool was picked up
-        #: (SketchUp: select the edges, then Offset): the first click
+        #: (select the edges, then Offset): the first click
         #: starts the offset instead of picking.
         self._armed: bool = False
 
@@ -187,7 +191,7 @@ class OffsetTool(Tool):
 
     # ---- Edges mode (issue #40) ----------------------------------------------
     def _arm_from_selection(self, viewport) -> None:
-        """SketchUp's other way in: the edges were selected BEFORE the tool
+        """The other way in: the edges were selected BEFORE the tool
         was picked up. Two or more edges and nothing else → their run is
         the thing to offset, and the first click starts the drag."""
         scene = getattr(viewport, "scene", None)
@@ -215,6 +219,19 @@ class OffsetTool(Tool):
         points, closed = run
         normal = _newell(points)
         if normal is None:
+            if len(points) == 2 and not closed:
+                # ONE line on its own: say so, and show it. Rafael clicked
+                # his roof line, got the «not in line» message and could not
+                # see why — the line it should have joined had been lost in
+                # an undo, so there was only one (revision 4, 04:42–05:08).
+                viewport.flash_status(tr(
+                    "This line is on its own — nothing is joined to its "
+                    "ends, so there is no chain to offset. Draw the "
+                    "missing line, or select the edges to offset."), 6000)
+                edge = getattr(self, "hovered_edge", None)
+                if edge is not None and hasattr(viewport, "scene"):
+                    viewport.scene.select([edge])
+                return False
             viewport.flash_status(tr(
                 "Offset needs at least two edges that are not in line — a "
                 "straight run has no plane to offset in."), 5000)
@@ -279,8 +296,8 @@ class OffsetTool(Tool):
         off = self._offset_points()
         if off is None:
             viewport.flash_status(tr(
-                "{d:.3g} m collapses this run — try a smaller offset",
-                d=abs(self.distance)), 5000)
+                "{d} collapses this run — try a smaller offset",
+                d=fmt_len(abs(self.distance))), 5000)
             self._reset()
             viewport.update()
             return
@@ -300,12 +317,13 @@ class OffsetTool(Tool):
         side = tr("inward") if sign > 0 else tr("outward")
         if room <= 1e-4:
             viewport.flash_status(tr(
-                "{d:.3g} m closes this face — it takes no offset {side}",
-                d=abs(self.distance), side=side), 5000)
+                "{d} closes this face — it takes no offset {side}",
+                d=fmt_len(abs(self.distance)), side=side), 5000)
         else:
             viewport.flash_status(tr(
-                "{d:.3g} m closes this face — {side} it takes at most "
-                "{max:.3g} m", d=abs(self.distance), side=side, max=room),
+                "{d} closes this face — {side} it takes at most "
+                "{max}", d=fmt_len(abs(self.distance)), side=side,
+                max=fmt_len(room)),
                 5000)
         self._reset()
         viewport.update()

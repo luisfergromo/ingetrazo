@@ -43,7 +43,7 @@ COLOR_AXIS_Y = (0.16, 0.62, 0.36)
 COLOR_AXIS_Z = (0.20, 0.40, 0.78)
 COLOR_REFERENCE = (0.85, 0.30, 0.80)  # magenta — parallel / perpendicular
 COLOR_EXTENSION = (0.55, 0.55, 0.58)  # grey — collinear extension of an edge
-COLOR_IN_GROUP = (0.85, 0.30, 0.80)   # magenta — a point inside a group / component (SketchUp)
+COLOR_IN_GROUP = (0.85, 0.30, 0.80)   # magenta — a point inside a group / component
 COLOR_TANGENT = (0.20, 0.66, 0.74)    # cyan — an arc tangent to the arc it starts from
 COLOR_NONE = (0.0, 0.0, 0.0)
 
@@ -72,8 +72,11 @@ class SnapResult:
     # draws one from each encouraged point.
     guides: Optional[list] = None
     # ``"group"`` / ``"component"`` when the point belongs to one — the
-    # ScreenTip adds "in group" / "in component" (SketchUp).
+    # ScreenTip adds "in group" / "in component".
     context: Optional[str] = None
+    #: The ScreenTip's own words, already translated — what an extension's
+    #: inference says («Level PA»); wins over the kind's built-in label.
+    label: Optional[str] = None
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -88,11 +91,21 @@ def project_to_view_plane(point: QVector3D, ref: QVector3D,
     between the two picked points would add. So the moving endpoint has its
     depth (the dominant view axis) pulled to the reference point's, keeping
     the measurement in the plane of the drawing. Oblique views return the
-    point untouched (true 3-D distance, SketchUp-style).
+    point untouched (true 3-D distance, the classic behaviour).
     """
     if forward.length() < 1e-9:
         return point
     f = forward.normalized()
+    from core import axes as _axes
+    if not _axes.is_world():
+        # Inside a turned group the standard views face ITS axes (#44).
+        lf = _axes.to_local(f)
+        comps = [(abs(lf.x()), "x"), (abs(lf.y()), "y"), (abs(lf.z()), "z")]
+        best, name = max(comps)
+        if best < threshold:
+            return point
+        a = _axes.AXES[name]
+        return point + a * QVector3D.dotProduct(ref - point, a)
     ax, ay, az = abs(f.x()), abs(f.y()), abs(f.z())
     if max(ax, ay, az) < threshold:
         return point
@@ -119,6 +132,16 @@ def first_point_work_plane(forward: QVector3D, scene_center: QVector3D,
     if forward.length() < 1e-9:
         return None
     f = forward.normalized()
+    from core import axes as _axes
+    if not _axes.is_world():
+        lf = _axes.to_local(f)
+        comps = [(abs(lf.x()), "x"), (abs(lf.y()), "y"), (abs(lf.z()), "z")]
+        best, name = max(comps)
+        if best < threshold:
+            return None
+        a = _axes.axis(name)
+        sign = 1.0 if QVector3D.dotProduct(f, a) > 0 else -1.0
+        return scene_center, a * sign
     if max(abs(f.x()), abs(f.y()), abs(f.z())) < threshold:
         return None                     # oblique view — not axis-aligned
     # snap the normal to the exact dominant axis so the plane is clean
@@ -169,6 +192,9 @@ def _detect_axis_alignment(
     if length < 1e-6:
         return None
     cos_thresh = math.cos(math.radians(angle_deg))
+    from core import axes as _axes
+    if not _axes.is_world():
+        delta = _axes.to_local(delta)     # the context's own axes (#44)
     nx = abs(delta.x()) / length
     ny = abs(delta.y()) / length
     nz = abs(delta.z()) / length
@@ -251,7 +277,8 @@ def _direction_from_edge(edge, mode: str,
     if direction.length() < 1e-6:
         return None
     if mode == "perpendicular":
-        normal = plane_normal if plane_normal is not None else QVector3D(0, 0, 1)
+        from core.axes import AXES
+        normal = plane_normal if plane_normal is not None else QVector3D(AXES["z"])
         perp = QVector3D.crossProduct(normal, direction)
         if perp.length() < 1e-9:
             return None          # the edge stands square to the plane
@@ -270,11 +297,9 @@ ProjectOntoLine = Callable[[QVector3D, QVector3D], QVector3D]
 
 
 # Unit vectors for each world axis, used by the axis lock paths.
-_AXIS_VECTORS = {
-    "x": QVector3D(1.0, 0.0, 0.0),
-    "y": QVector3D(0.0, 1.0, 0.0),
-    "z": QVector3D(0.0, 0.0, 1.0),
-}
+# The SAME dict as core.axes.AXES (updated in place): the world's axes at
+# the top level, the open group's own inside it (issue #44).
+from core.axes import AXES as _AXIS_VECTORS  # noqa: E402
 
 
 def _closest_on_segment_2d(
@@ -295,6 +320,24 @@ def _closest_on_segment_2d(
     qx = ax + t * dx
     qy = ay + t * dy
     return math.hypot(px - qx, py - qy), t
+
+
+def _on_edge_point(edge, t: float,
+                   project_onto_line: Optional[ProjectOntoLine]) -> QVector3D:
+    """The point of ``edge`` under the cursor, given the screen parameter
+    ``t`` from :func:`_closest_on_segment_2d`. Under perspective ``t`` is
+    not the world parameter: on a long edge — a construction guide is tens
+    of metres once clipped to the view — lerping it put the «hovered» point
+    metres away and off screen, so a lock line could never take a guide's
+    height (issue #166, @pacaeiro: Shift on the blue axis, hover the guide).
+    Through the cursor ray instead, as rule 7 does, when the caller has it."""
+    ab = edge.b - edge.a
+    if project_onto_line is not None and ab.length() > 1e-9:
+        proj = project_onto_line(edge.a, ab)
+        if proj is not None:
+            tt = QVector3D.dotProduct(proj - edge.a, ab) / QVector3D.dotProduct(ab, ab)
+            return edge.a + ab * max(0.0, min(1.0, tt))
+    return edge.a + ab * t
 
 
 def _line_segment_intersection(
@@ -449,7 +492,7 @@ def _boundary_runs(loop) -> list:
 
 
 def curve_centers_of_face(face, xform=None) -> list:
-    """SketchUp's *Center* inference: the centre of every circle or arc on
+    """The *Center* inference: the centre of every circle or arc on
     the face's boundary — a circle face gives one, a rounded corner one
     per corner, a circular hole its own. ``[(centre, radius, key)]`` in
     world space (``xform`` places a component's face). ``key`` tells the
@@ -598,6 +641,37 @@ def _first_point_from_point(
                       guide_color=AXIS_COLORS[axis])
 
 
+def _edge_from_point_crossing(
+    edge, ref, cx, cy, world_to_pixel, threshold_px, is_occluded=None,
+) -> Optional[SnapResult]:
+    """Where an axis line through ``ref`` (the acquired point) crosses
+    ``edge``, when that crossing is within the snap radius of the cursor —
+    a green 'from point' on the edge with the axis-coloured guide back to
+    ``ref``. ``None`` when no axis line meets the edge near the cursor."""
+    best = None
+    for axis, a in _AXIS_VECTORS.items():
+        hit = _line_segment_intersection(ref, a, edge.a, edge.b)
+        if hit is None or (hit - ref).length() < 1e-4:
+            continue
+        hp = world_to_pixel(hit)
+        if hp is None:
+            continue
+        d = math.hypot(hp[0] - cx, hp[1] - cy)
+        if d > threshold_px:
+            continue
+        if is_occluded is not None and is_occluded(hit):
+            continue
+        if best is None or d < best[0]:
+            best = (d, hit, axis)
+    if best is None:
+        return None
+    _, hit, axis = best
+    return SnapResult(hit, "from_point", COLOR_ENDPOINT,
+                      guide=(QVector3D(ref), hit),
+                      guide_color=AXIS_COLORS[axis],
+                      context=getattr(edge, "context", None))
+
+
 def _in_plane_with_point_snap(
     ref, candidate, plane_normal, cx, cy, world_to_pixel, threshold_px,
     is_occluded=None,
@@ -612,7 +686,7 @@ def _in_plane_with_point_snap(
     the first window gives its dotted line along its own wall «estupendamente»,
     but a window on ANOTHER wall at the same height had nothing to line up
     with — «que la línea guía se extendiera por aquí y yo pudiera fijar la
-    ventana aquí… tampoco eso lo hace SketchUp». It does not: SketchUp's
+    ventana aquí… tampoco eso lo hace […]». It does not: the classic
     'from point' is the axis LINE through the corner, which meets a
     perpendicular wall in a single point and the opposite wall not at all.
     The plane through the corner meets both in a line.
@@ -675,7 +749,8 @@ def _in_plane_with_point_snap(
 
 
 def _extension_snap(
-    candidate_world, cx, cy, scene, world_to_pixel, et, start_point, is_occluded
+    candidate_world, cx, cy, scene, world_to_pixel, et, start_point, is_occluded,
+    project_onto_line=None,
 ) -> Optional[SnapResult]:
     """Extension / intersection inference: when the draw direction is collinear
     with an edge and the cursor is on that edge's *continuation* (beyond its
@@ -690,15 +765,54 @@ def _extension_snap(
     if draw.length() < 1e-6:
         return None
     draw = draw.normalized()
+    # The draw direction above comes from where the cursor ray meets the
+    # scene. Over empty sky that is on the draw; over a face it is a point
+    # on the wall BEHIND, and the direction is nonsense — the extension of
+    # a sloped roof edge showed only with nothing behind it («a veces te
+    # bloquea y a veces no, depende de cómo te orientes», Rafael, revision
+    # 4, 03:56). So when the 3D test fails the same question is asked on
+    # screen, where the cursor really is, and the point is taken on the
+    # edge's line under the cursor ray instead of on that far wall.
+    sp = world_to_pixel(start_point) if project_onto_line is not None else None
+    sdx = sdy = 0.0
+    if sp is not None:
+        sdx, sdy = cx - sp[0], cy - sp[1]
+    sdl = math.hypot(sdx, sdy)
     best_ext = None  # (dist, proj, from_end, edge, dir)
     for edge in scene.edges:
+        # One chord of a circle, arc or smoothed surface has no line worth
+        # extending — a sphere's soft edges and the next circle's segments
+        # threw dashed guides across the model (issue #140) — and a hidden
+        # edge is not there to be followed.
+        if (getattr(edge, "soft", False) or getattr(edge, "hidden", False)
+                or getattr(edge, "curve", None) is not None):
+            continue
         ab = edge.b - edge.a
         if ab.length() < 1e-9:
             continue
         u = ab.normalized()
+        at = candidate_world
         if abs(QVector3D.dotProduct(draw, u)) < 0.966:  # ~15°: drawing along it
-            continue
-        t = QVector3D.dotProduct(candidate_world - edge.a, u)
+            # The on-screen reading is only for EXTENDING this edge from its
+            # own line (the start sits on it, as Rafael's did at the eave):
+            # a merely parallel edge, or one that runs toward the camera and
+            # shows as a stub, has no trustworthy screen direction — letting
+            # those in handed a midpoint over to an «extension» 5.8 m deep
+            # (snap matrix, front camera).
+            if sdl < 4.0:
+                continue
+            off = start_point - edge.a
+            if (off - u * QVector3D.dotProduct(off, u)).length() > 1e-3:
+                continue
+            pa, pb = world_to_pixel(edge.a), world_to_pixel(edge.b)
+            if pa is None or pb is None:
+                continue
+            edx, edy = pb[0] - pa[0], pb[1] - pa[1]
+            edl = math.hypot(edx, edy)
+            if edl < 20.0 or abs(sdx * edx + sdy * edy) < 0.966 * sdl * edl:
+                continue
+            at = project_onto_line(edge.a, u)
+        t = QVector3D.dotProduct(at - edge.a, u)
         if -1e-6 <= t <= ab.length() + 1e-6:
             continue  # on the segment itself
         proj = edge.a + u * t
@@ -742,43 +856,54 @@ def _extension_snap(
 def _from_point_snap(
     scene, start_point, draw_dir, cx, cy, world_to_pixel, threshold_px,
     is_occluded, extra_point=None, axis_deg: float = 10.0,
-    hovered_refs: bool = False,
+    hovered_refs: bool = False, line_dir: Optional[QVector3D] = None,
+    project_onto_line: Optional[ProjectOntoLine] = None,
 ) -> Optional[SnapResult]:
     """'From point' inference ("Desde el punto"), the single clean version.
 
-    Fires **only when the draw runs along an axis** (within ``axis_deg``), the
-    way SketchUp lights up the red/green/blue axis line. For every corner (and
-    midpoint) it snaps to the *fixed* foot of that point on the axis-aligned draw
-    line — the corner's coordinate along the draw, the start's other coords. So
-    the green point pins one spot (lined up with the corner) instead of sliding
-    along the projection or scattering when the draw wanders off-axis.
+    Without ``line_dir``, fires only when the draw runs along an axis (within
+    ``axis_deg``), the way the red/green/blue axis line lights up. Under
+    an explicit directional lock, ``line_dir`` supplies that locked direction
+    instead. For every corner (and midpoint) it snaps to the fixed foot of that
+    point on the draw line, pinning one spot instead of sliding or scattering.
 
     Corners → green 'from point' with an axis-coloured guide; midpoints → cyan.
 
     With ``hovered_refs`` (the arrow-key lock) the cursor may also sit on the
     REFERENCE itself — a corner or midpoint, or any point of an edge — far
     from the draw line, and the snap lands on that reference's foot. That is
-    how SketchUp's lock is used: Tape from the wall's bottom edge, ↑, hover
+    how the lock is used: Tape from the wall's bottom edge, ↑, hover
     the window's corner, and the guide takes the window's height (Rafael,
     04:20: «cuando pulso la flechita para subir no me hace el snap»)."""
     if start_point is None or draw_dir.length() < 1e-6:
         return None
-    u = draw_dir.normalized()
-    # The draw must be along an axis; orient that axis along the draw direction.
-    adir = None
-    cos_axis = math.cos(math.radians(axis_deg))
-    for a in _AXIS_VECTORS.values():
-        dp = QVector3D.dotProduct(u, a)
-        if abs(dp) >= cos_axis:
-            adir = a if dp > 0 else -a
-            break
-    if adir is None:
-        return None  # diagonal draw — no clean 'from point'
+    if line_dir is not None:
+        if line_dir.length() < 1e-6:
+            return None
+        adir = QVector3D(line_dir).normalized()
+    else:
+        u = draw_dir.normalized()
+        # The draw must be along an axis; orient that axis along the draw direction.
+        adir = None
+        cos_axis = math.cos(math.radians(axis_deg))
+        for a in _AXIS_VECTORS.values():
+            dp = QVector3D.dotProduct(u, a)
+            if abs(dp) >= cos_axis:
+                adir = a if dp > 0 else -a
+                break
+        if adir is None:
+            return None  # diagonal draw — no clean 'from point'
 
     refs = []
     if extra_point is not None:
         refs.append((extra_point, "from_point", COLOR_ENDPOINT))
     for edge in scene.edges:
+        if getattr(edge, "figure", False):
+            # A face-me figure is scenery, not drawing: its feet snap when you
+            # point at them, but no line of the drawing lines up with it
+            # (Rafael, revision 4, 04:08: the scale figure pulled «from
+            # point» guides metres away from the roof he was drawing).
+            continue
         refs.append((edge.a, "from_point", COLOR_ENDPOINT))
         refs.append((edge.b, "from_point", COLOR_ENDPOINT))
         refs.append(((edge.a + edge.b) * 0.5, "midpoint", COLOR_MIDPOINT))
@@ -805,7 +930,7 @@ def _from_point_snap(
                 continue
             d, t = _closest_on_segment_2d((cx, cy), pa, pb)
             if d <= threshold_px and (best_edge is None or d < best_edge[0]):
-                best_edge = (d, edge.a + (edge.b - edge.a) * t)
+                best_edge = (d, _on_edge_point(edge, t, project_onto_line))
         if best_edge is not None:
             refs.append((best_edge[1], "from_point", COLOR_ENDPOINT, True))
 
@@ -914,7 +1039,7 @@ def _intersection_snap(
     their meeting point was never offered — the cursor slid along whichever
     guide was nearest (``on_edge``). The X of two guides is the whole reason to
     draw them, so collect the edges whose screen span passes under the cursor
-    and intersect them pairwise in 3-D (SketchUp's edge intersection).
+    and intersect them pairwise in 3-D (edge intersection).
 
     ``segment_intersection`` rejects parallel and *skew* pairs, so two edges
     that merely cross in projection do not light up a point that isn't there.
@@ -973,6 +1098,7 @@ def _intersection_snap(
 def _lock_line_snaps(
     scene, start_point, line_dir, cx, cy, world_to_pixel, threshold_px,
     is_occluded, acquired_point, chain_first_point=None,
+    project_onto_line=None,
 ) -> Optional[SnapResult]:
     """What a directional lock still lets you fetch, in order: the chain's
     own first point (closing), a vertex sitting ON the lock line, the
@@ -1034,7 +1160,8 @@ def _lock_line_snaps(
     return _from_point_snap(
         scene, start_point, line_dir, cx, cy, world_to_pixel,
         threshold_px, is_occluded, extra_point=acquired_point,
-        hovered_refs=True,
+        hovered_refs=True, line_dir=line_dir,
+        project_onto_line=project_onto_line,
     )
 
 
@@ -1070,12 +1197,20 @@ def compute_snap(
     shift_lock_color=None,
     linear_mode: str = "all",
     work_plane_normal: Optional[QVector3D] = None,
+    radial_arm: bool = False,
 ) -> SnapResult:
-    # Linear-inference toggle (SketchUp's Alt): "all" = every inference, "off" =
+    # Linear-inference toggle (Alt): "all" = every inference, "off" =
     # point snaps only, "parallel_perp" = keep only parallel/perpendicular. The
     # explicit locks (arrow keys, Down-arrow reference) always work regardless.
     allow_axis = linear_mode == "all"          # axis / from-point / extension
     allow_parperp = linear_mode != "off"       # parallel / perpendicular
+    # A protractor ARM (Rotate, Protractor) is a direction from the centre,
+    # not a line being drawn: 'through point', 'extension' and 'from point'
+    # are line-drawing inferences. On an arm they only fought the axis
+    # magnet — a diameter 1.7° off X held the arm on its own direction
+    # through the reference just clicked, and a chord of the next circle
+    # turned the angle with the cursor's distance (issue #140, @pacaeiro).
+    line_inferences = allow_axis and not radial_arm
 
     # 1. Explicit axis lock (arrow keys). Use the viewport's camera-aware
     #    projection so locks to Z (vertical) actually move along Z. Existing
@@ -1101,13 +1236,14 @@ def compute_snap(
         hit = _lock_line_snaps(
             scene, start_point, axis_dir, cx, cy, world_to_pixel,
             threshold_px, is_occluded, acquired_point, chain_first_point,
+            project_onto_line,
         )
         if hit is not None:
             return hit
         return SnapResult(locked, "axis", AXIS_COLORS[axis_lock], axis=axis_lock)
 
     # 1.5 Sticky inference lock (Shift captured an active inference): hold that
-    #     direction regardless of cursor, the way SketchUp's Shift locks whatever
+    #     direction regardless of cursor, the way Shift classically locks whatever
     #     inference was showing. Vertices on the lock line still snap so you can
     #     land exactly on a corner without leaving the lock.
     if (
@@ -1132,6 +1268,7 @@ def compute_snap(
         hit = _lock_line_snaps(
             scene, start_point, lock_dir, cx, cy, world_to_pixel,
             threshold_px, is_occluded, acquired_point, chain_first_point,
+            project_onto_line,
         )
         if hit is not None:
             return hit
@@ -1149,6 +1286,16 @@ def compute_snap(
                                          work_plane_normal)
         if direction is not None:
             locked = project_onto_line(start_point, direction)
+            if QVector3D.dotProduct(locked - start_point, direction) < 0:
+                direction = -direction
+            hit = _lock_line_snaps(
+                scene, start_point, direction, candidate_pixel[0],
+                candidate_pixel[1], world_to_pixel, threshold_px,
+                is_occluded, acquired_point, chain_first_point,
+                project_onto_line,
+            )
+            if hit is not None:
+                return hit
             return SnapResult(locked, "reference", COLOR_REFERENCE)
 
     # 3. Shift held + auto axis inference → lock to that axis. This is the
@@ -1170,6 +1317,7 @@ def compute_snap(
             hit = _lock_line_snaps(
                 scene, start_point, axis_dir, cx3, cy3, world_to_pixel,
                 threshold_px, is_occluded, acquired_point, chain_first_point,
+                project_onto_line,
             )
             if hit is not None:
                 return hit
@@ -1243,7 +1391,7 @@ def compute_snap(
     if best is None or best[2] != "close":
         # The named points first (a tie goes to the first considered): an
         # arc's midpoint that happens to fall on one of its facet vertices
-        # reads "Arc midpoint", as SketchUp says, not "Endpoint".
+        # reads "Arc midpoint", the usual name, not "Endpoint".
         plain = []
         for edge in scene.edges:
             if getattr(edge, "center", False):
@@ -1251,7 +1399,7 @@ def compute_snap(
                 # viewport hands it in as a degenerate pseudo-edge).
                 _consider(edge.a, "center", COLOR_ENDPOINT)
             elif getattr(edge, "component_origin", False):
-                # A group's / component's own origin (SketchUp's "Component
+                # A group's / component's own origin (the "Component
                 # Origin Point") — its insertion point, worth grabbing.
                 _consider(edge.a, "component_origin", COLOR_ORIGIN)
             elif getattr(edge, "arc_midpoint", False):
@@ -1263,7 +1411,7 @@ def compute_snap(
                 continue
             else:
                 plain.append(edge)
-        # The world origin is a point inference like a corner (SketchUp's
+        # The world origin is a point inference like a corner (the
         # "Origin"), so it must beat the LINEAR inferences of rule 5 — it
         # sat in rule 6, behind 'from point' and the axis line, and a
         # cursor aligned with an encouraged point or the red axis clicked
@@ -1271,9 +1419,8 @@ def compute_snap(
         # 2026-09-15: «me quiero poner en el origen y no se pone»).
         _consider(QVector3D(0.0, 0.0, 0.0), "origin", COLOR_ORIGIN)
         for edge in plain:
-            # SketchUp paints every point inference magenta when the
-            # geometry is inside a group or component.
-            # (SketchUp paints these magenta inside groups; Marco found the
+            # The usual convention paints every point inference magenta when
+            # the geometry is inside a group or component; Marco found the
             # magenta everywhere on a model made of components tiring —
             # 2026-09-14 — so the colours stay, the tip says "in component".)
             _consider(edge.a, "endpoint", COLOR_ENDPOINT, context=getattr(edge, "context", None))
@@ -1334,7 +1481,7 @@ def compute_snap(
                 # projection win: landing where this perpendicular lines up with
                 # a corner is the exact point the user is after, and the generic
                 # lock would otherwise shadow it.
-                if allow_axis:
+                if line_inferences:
                     fp = _from_point_snap(
                         scene, start_point, candidate_world - start_point,
                         cx, cy, world_to_pixel, threshold_px, is_occluded,
@@ -1364,7 +1511,7 @@ def compute_snap(
     #     what gave it away. Same shape as the from-point fix an hour
     #     earlier: an inference DERIVED from a point must not beat the
     #     point it came from.
-    if allow_axis and start_point is not None:
+    if line_inferences and start_point is not None:
         sobre_el_punto = False
         if acquired_point is not None:
             ap = world_to_pixel(acquired_point)
@@ -1384,9 +1531,10 @@ def compute_snap(
     #     a perpendicular one. Gated on the draw direction being collinear with
     #     the edge, so it only fires when you mean to extend (no line noise).
     #     Runs before 'from point' so extending a line wins over a corner line-up.
-    if allow_axis:
+    if line_inferences:
         ext = _extension_snap(
-            candidate_world, cx, cy, scene, world_to_pixel, et, start_point, is_occluded
+            candidate_world, cx, cy, scene, world_to_pixel, et, start_point,
+            is_occluded, project_onto_line=project_onto_line,
         )
         if ext is not None:
             return ext
@@ -1395,7 +1543,7 @@ def compute_snap(
     #     corner (green) or midpoint (cyan) — the fixed foot of that point on the
     #     axis-aligned draw line. Only fires on-axis, so free-angle draws stay
     #     quiet and the point never scatters or slides.
-    if allow_axis and start_point is not None:
+    if line_inferences and start_point is not None:
         fp = _from_point_snap(
             scene, start_point, candidate_world - start_point,
             cx, cy, world_to_pixel, threshold_px, is_occluded,
@@ -1404,7 +1552,7 @@ def compute_snap(
         if fp is not None:
             return fp
 
-    # 5c. Edge / guide intersection (SketchUp's green X): where two edges or
+    # 5c. Edge / guide intersection (the green X): where two edges or
     #     guide lines actually cross. Only the directional locks above build an
     #     intersection, so crossing guides never offered their meeting point —
     #     the cursor slid along the nearest guide. Runs before midpoint/on-edge
@@ -1454,6 +1602,17 @@ def compute_snap(
             best_edge = (d, on_pt, edge)
     if best_edge is not None:
         _d, on_pt, edge = best_edge
+        if line_inferences and acquired_point is not None:
+            # On an edge AND lined up with the acquired point: the one point
+            # of the edge that is both. The edge used to win outright, the
+            # dotted «from point» line vanished as the cursor reached the
+            # wall and the length jumped with every pixel — «hasta el final
+            # no me llega» (Rafael, revision 4, 01:30).
+            cross = _edge_from_point_crossing(
+                edge, acquired_point, cx, cy, world_to_pixel, threshold_px,
+                is_occluded)
+            if cross is not None:
+                return cross
         if getattr(edge, "guide", False):
             return SnapResult(on_pt, "on_line", COLOR_ON_EDGE)   # a guide line
         return SnapResult(on_pt, "on_edge", COLOR_ON_EDGE,
@@ -1494,7 +1653,7 @@ def compute_snap(
         if pf is not None:
             return pf
 
-    # 8d. 'From point' from an encouraged point — SketchUp's dotted line
+    # 8d. 'From point' from an encouraged point — the dotted line
     #     from the corner you last hovered. This is how a window's first
     #     corner lands level with the door's top (Rafael, 2026-09-10: «te
     #     salía una línea de extensión para poder dibujar aquí la ventana»).
@@ -1529,14 +1688,14 @@ def compute_snap(
     #         rectangle under way      none         x = 6.370   (drifted)
     #
     #     The machinery was built and working; it was locked away at exactly
-    #     the moment he needed it. SketchUp offers it mid-operation too.
+    #     the moment he needed it. Push/pull modellers offer it mid-operation too.
     #
     #     It is a SECOND call rather than an unlocked condition on 5d,
     #     because 5d sits above the named points: opening it in place would
     #     have let an alignment line outrank a midpoint or the origin, and
     #     that precedence is not ours to spend. Down here it competes only
     #     with the soft axis cue below — the weakest rule there is.
-    if allow_axis:
+    if line_inferences:
         if acquired_points:
             tp = _two_point_snap(
                 acquired_points, candidate_world, cx, cy, world_to_pixel,

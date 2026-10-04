@@ -29,6 +29,8 @@ ROOT = Path(SPECPATH).resolve()
 datas = [
     ('resources/shaders/*.vert',   'resources/shaders'),
     ('resources/shaders/*.frag',   'resources/shaders'),
+    # Render with Blender (#181): the script Blender runs on the job.
+    ('resources/blender/*.py',     'resources/blender'),
     ('resources/icons/*.png',      'resources/icons'),
     ('resources/icons/*.ico',      'resources/icons'),
     ('resources/icons/mimetypes/*.ico', 'resources/icons/mimetypes'),
@@ -56,6 +58,10 @@ datas = [
     ('i18n/*.json',                'i18n'),
     # Bundled plugins (Extensions menu) — discovered by file path at runtime.
     ('plugins/*.py',               'plugins'),
+    # Example extensions: shipped but NOT loaded — Extensions ▸ Example
+    # extensions copies one into the user's plugins folder on request.
+    # Whole folder: an example extension can be a package (CAM, PR #132).
+    ('examples/extensions',        'examples/extensions'),
     # The MCP server (stdlib-only): `ingetrazo --mcp` runs it by path, and
     # the console build below makes it a program of its own on Windows.
     ('scripts/ingetrazo_mcp.py',   'scripts'),
@@ -69,13 +75,24 @@ for opt_src, opt_dst in [
     if (ROOT / opt_src).is_dir():
         datas.append((opt_src, opt_dst))
 
-# The DWG satellite (LibreDWG dwg2dxf, see vendor/libredwg/SOURCES.md):
-# Linux-only ELF, found by formats/dwg_bridge.py at vendor/libredwg/bin
-# inside the bundle. The Windows build skips it — DWG on Windows stays a
-# documented gap until a dwg2dxf.exe exists.
+# The DWG satellite (LibreDWG dwg2dxf, see vendor/libredwg/SOURCES.md),
+# found by formats/dwg_bridge.py at vendor/libredwg/bin inside the bundle
+# (#101). Linux: the ELF in git. Windows: dwg2dxf.exe and its two DLLs,
+# which build-windows.yml fetches from LibreDWG's own win64 release.
+# macOS: built from the release tarball by release-macos.yml. A platform
+# whose files are not there builds without DWG, and --check says so.
 import sys as _sys
-if _sys.platform.startswith("linux"):
-    datas.append(('vendor/libredwg/bin/dwg2dxf', 'vendor/libredwg/bin'))
+_DWG_FILES = {
+    "linux": ["dwg2dxf"],
+    "win32": ["dwg2dxf.exe", "libredwg-0.dll", "libiconv-2.dll"],
+    "darwin": ["dwg2dxf"],
+}
+for _plat, _names in _DWG_FILES.items():
+    if _sys.platform.startswith(_plat):
+        for _n in _names:
+            if (ROOT / "vendor/libredwg/bin" / _n).is_file():
+                datas.append((f"vendor/libredwg/bin/{_n}", "vendor/libredwg/bin"))
+        datas.append(("vendor/libredwg/SOURCES.md", "vendor/libredwg"))
 
 # ── Hidden imports ───────────────────────────────────────────────────────────
 hiddenimports = [
@@ -93,12 +110,27 @@ hiddenimports = [
 # collect_submodules because ezdxf lazy-loads its own internals too.
 from PyInstaller.utils.hooks import collect_submodules
 hiddenimports += collect_submodules('ezdxf')
+# manifold3d (Solid Tools) is imported inside core.solids' functions — one
+# self-contained native extension module (libstdc++/libm/libc only).
+hiddenimports += ['manifold3d', 'core.solids', 'tools.solid_tools']
+# Copy/Paste between windows (#76): imported lazily by the viewport and
+# the main window.
+hiddenimports += ['formats.clip']
 hiddenimports += [
     # The bundled plugins import these at RUN time, so static analysis never
     # sees them and they were left out: the AI assistant died on load with
     # "cannot import name 'ai' from 'core'" in every packaged build.
     'core.ai',
+    # The recipe book both AI doors read. It reaches the bundle only
+    # through a plugin (the assistant) and a by-path script (the MCP
+    # server), so analysis never sees it — and its absence is SILENT: the
+    # server falls back to a short string and the model goes back to
+    # probing the API, which is the very waste it exists to stop.
+    'core.ai_recipes',
     'core.bim',
+    # Render with Blender (#181): the plugin's logic and the GLB it sends.
+    'core.render_blender',
+    'formats.gltf',
     'tools.place_group',
     'tools.paste',
     'georef.points',
@@ -123,16 +155,52 @@ hiddenimports += [
     'openskp.errors',
     'openskp.scene',
 ]
+
+# ...and every other app module a by-path file imports, found by reading
+# them rather than listed by hand. 0.5.6 shipped views.fold_section (new,
+# imported only by the AI and Render plugins) outside every PyInstaller
+# build, and those three extensions failed to load on Windows (#208).
+def _app_imports(paths):
+    import ast
+    found = set()
+    for path in paths:
+        try:
+            tree = ast.parse(Path(path).read_text(encoding='utf-8'))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+            else:
+                continue
+            for name in names:
+                parts = name.split('.')
+                if (Path(*parts).with_suffix('.py').is_file()
+                        or (Path(*parts) / '__init__.py').is_file()):
+                    found.add(name)
+    return sorted(found)
+
+
+hiddenimports += _app_imports(
+    [*Path('plugins').glob('*.py'),
+     *Path('examples/extensions').rglob('*.py'),
+     Path('scripts/ingetrazo_mcp.py')])
 # The rest of openskp (export/*, _face_groups, instanced_scene, codegen…)
 # plus its PACKAGE DATA: create.py loads ``_scaffold/blank_v17.skp`` via
 # importlib.resources and PyInstaller never bundles non-Python files on its
 # own. Without this every PyInstaller build (Windows exe, AppImage, tar)
-# died on Export ▸ SketchUp with "[Errno 2] No such file or directory:
+# died on the .skp export with "[Errno 2] No such file or directory:
 # …\\_internal\\openskp\\_scaffold\\blank_v17.skp" (reported from Windows,
 # 0.4.1). The Flatpak was fine because it ships the whole site-packages.
 from PyInstaller.utils.hooks import collect_data_files
 hiddenimports += collect_submodules('openskp')
-datas += collect_data_files('openskp')
+# ...except _scaffold/blank_v17.skp, the blank document openskp's writer
+# builds its files on top of. IngeTrazo does not distribute it and has no
+# .skp export; main.py --check fails a frozen bundle that still carries it.
+datas += [(src, dst) for src, dst in collect_data_files('openskp')
+          if '_scaffold' not in src.replace('\\', '/')]
 # openskp 1.3.0 triangulates with mapbox_earcut instead of Shapely, so the
 # reader now pulls a NATIVE extension (_core*.so) that did not exist in the
 # dependency tree before. ``import openskp`` fails outright without it, so
@@ -149,7 +217,7 @@ hiddenimports += collect_submodules('mapbox_earcut')
 # so the .pyd travelled without its dependencies and the bundle died with
 # «DLL load failed while importing _core: The specified module could not
 # be found» — which, because openskp imports it at module level, means no
-# SketchUp import or export at all. Caught by ``--check`` on the v0.4.3
+# .skp import or export at all. Caught by ``--check`` on the v0.4.3
 # tag, which is what that check is for.
 #
 # The DLLs go to the bundle root: PyInstaller puts sys._MEIPASS on the DLL
@@ -229,6 +297,16 @@ if sys.platform.startswith('linux'):
     print('spec: dropped %d bundled X libraries (issue #6)'
           % (_before - len(a.binaries)))
 
+# The DWG converter's DLLs live beside dwg2dxf.exe in vendor/libredwg/bin,
+# where Windows looks for them when the .exe starts. PyInstaller also
+# collects them into the bundle's root as dependencies of that .exe: a
+# second copy of 31 MB nobody loads (#101).
+if sys.platform == 'win32':
+    _DWG_DLLS = {'libredwg-0.dll', 'libiconv-2.dll'}
+    a.binaries = [b for b in a.binaries
+                  if not (Path(b[0]).name.lower() in _DWG_DLLS
+                          and Path(b[0]).parent == Path('.'))]
+
 pyz = PYZ(a.pure, a.zipped_data)
 
 icon = None
@@ -264,7 +342,7 @@ mcp_a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['core.ai_recipes'],       # its recipe book, read at import
     hookspath=[],
     runtime_hooks=[],
     excludes=excludes,
@@ -298,3 +376,45 @@ coll = COLLECT(
     upx_exclude=[],
     name='ingetrazo',
 )
+
+# ── macOS: wrap the onedir COLLECT as a double-clickable .app ────────────────
+# ingetrazo-mcp rides along inside Contents/MacOS/ as a sibling binary (same
+# onedir the other platforms ship); nothing launches it but a stdio-speaking
+# MCP client that already knows its path, so it does not need its own bundle.
+if sys.platform == 'darwin':
+    from core.version import __version__ as _version
+    mac_icon = ROOT / 'resources' / 'icons' / 'ingetrazo.icns'
+    app = BUNDLE(
+        coll,
+        name='IngeTrazo.app',
+        icon=str(mac_icon) if mac_icon.exists() else None,
+        bundle_identifier='com.ingetrazo.IngeTrazo',
+        info_plist={
+            'CFBundleName': 'IngeTrazo',
+            'CFBundleDisplayName': 'IngeTrazo',
+            'CFBundleShortVersionString': _version,
+            'CFBundleVersion': _version,
+            'NSHighResolutionCapable': True,
+            # PyInstaller's own Info.plist template defaults this to True,
+            # which makes macOS treat the bundle as agent-only: no Dock icon,
+            # no window, no menu bar — a GUI app must say so explicitly.
+            'LSBackgroundOnly': False,
+            'NSHumanReadableCopyright': 'GPL-3.0-or-later — Marco Sumari Tellez and IngeTrazo contributors',
+            # .igz / .skp double-click-to-open, same association the other
+            # platforms register (packaging/ingetrazo.desktop, the .iss).
+            'CFBundleDocumentTypes': [
+                {
+                    'CFBundleTypeName': 'IngeTrazo document',
+                    'CFBundleTypeExtensions': ['igz'],
+                    'CFBundleTypeRole': 'Editor',
+                    'LSHandlerRank': 'Owner',
+                },
+                {
+                    'CFBundleTypeName': 'SKP document',
+                    'CFBundleTypeExtensions': ['skp'],
+                    'CFBundleTypeRole': 'Editor',
+                    'LSHandlerRank': 'Alternate',
+                },
+            ],
+        },
+    )

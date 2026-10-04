@@ -11,13 +11,16 @@ the same code the PDF export uses, so screen and paper always agree.
 """
 from __future__ import annotations
 
+from views import prompts as _prompts
+
 import datetime
 import math
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QKeySequence,
-                           QPageLayout, QPageSize, QPainter, QPdfWriter,
+                           QPageLayout, QPageSize, QPainter, QPalette,
+                           QPdfWriter,
                            QPen, QShortcut, QTransform, QVector3D)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QGraphicsItem,
@@ -38,7 +41,9 @@ from core.composition import (COMMON_SCALES, NEW_FRAME_STYLE, PAPER_SIZES_MM, RE
                               apply_frame_camera, cota_line_deg,
                               format_scale, parse_scale,
                               readable_deg, snap_mm)
+from views.color_dialog import get_color
 from core.i18n import tr
+from views.theme import style as theme_style
 from core.composition import pen_px
 from core.saved_views import apply_shadow_state, georef_objects
 from PySide6.QtWidgets import QGraphicsLineItem, QGridLayout, QWidget as _QWidget  # noqa: E402
@@ -251,7 +256,7 @@ def view_title_texts(frame: MarcoVista) -> dict:
     uid = getattr(frame, "uid", "") or ""
     # A perspective frame is not drawn to any scale: «ESC. 1:N» under it
     # would be a lie on a printed sheet, so it reads «SIN ESCALA» — what
-    # LayOut writes under a perspective viewport (Marco, 2026-09-17).
+    # the usual convention under a perspective viewport (Marco, 2026-09-17).
     persp = bool(getattr(frame, "perspective", False))
     n = f"{frame.scale_n:g}"
     scale_field = tr("no scale") if persp else format_scale(frame.scale_n)
@@ -309,7 +314,7 @@ def view_title_extent(frame: MarcoVista) -> tuple:
 
 def _paint_title_bubble(painter: QPainter, cx: float, cy: float, d: float,
                         number: str, sheet: str, ink: QColor) -> None:
-    """LayOut's view bubble: a circle with the number, split by a rule
+    """The view bubble: a circle with the number, split by a rule
     with the sheet reference underneath when there is one."""
     pen = QPen(ink)
     pen.setWidthF(0.35)
@@ -478,7 +483,7 @@ def _paint_stale_badge(painter: QPainter, frame: MarcoVista) -> None:
 
 def _paint_view_edit_border(painter: QPainter, frame: MarcoVista) -> None:
     """The frame whose view is being edited in place: a blue dashed inset
-    border and a small tag (LayOut greys the rest of the page instead)."""
+    border and a small tag (sheet layout programs grey the page instead)."""
     pen = QPen(QColor(58, 110, 165), 0.6, Qt.DashLine)
     painter.setPen(pen)
     painter.setBrush(Qt.NoBrush)
@@ -588,8 +593,9 @@ _VECTOR_INK = QColor(30, 36, 44)
 def vector_pens(frame: MarcoVista) -> dict:
     """The three pens of the vector style, by line class (core.hlr KIND_*):
     cut / profile / edge widths from the frame, in paper mm."""
-    from core.hlr import KIND_CUT, KIND_EDGE, KIND_PROFILE
+    from core.hlr import KIND_CUT, KIND_EDGE, KIND_HIDDEN, KIND_PROFILE
     widths = {
+        KIND_HIDDEN: float(getattr(frame, "pen_edge_mm", 0.18) or 0.18),
         KIND_EDGE: float(getattr(frame, "pen_edge_mm", 0.18) or 0.18),
         KIND_PROFILE: float(getattr(frame, "pen_profile_mm", 0.35) or 0.35),
         KIND_CUT: float(getattr(frame, "pen_cut_mm", 0.5) or 0.5)}
@@ -599,6 +605,11 @@ def vector_pens(frame: MarcoVista) -> dict:
         pen.setWidthF(max(0.05, w))
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
+        if kind == KIND_HIDDEN:
+            # Dashed, in paper mm whatever the pen: 1.5 mm dash, 0.8 gap.
+            pen.setCapStyle(Qt.FlatCap)
+            w = max(0.05, w)
+            pen.setDashPattern([1.5 / w, 0.8 / w])
         pens[kind] = pen
     return pens
 
@@ -614,7 +625,7 @@ def _paint_hlr_lines_mm(painter: QPainter, frame: MarcoVista, hlr,
     sheet never passes one."""
     import numpy as np
     from PySide6.QtCore import QLineF
-    from core.hlr import KIND_CUT, KIND_EDGE, KIND_PROFILE
+    from core.hlr import KIND_CUT, KIND_EDGE, KIND_HIDDEN, KIND_PROFILE
     segs = np.asarray(hlr, dtype=float).reshape(-1, 4)
     pens = vector_pens(frame)
     if kinds is None or len(kinds) != len(segs):
@@ -623,15 +634,16 @@ def _paint_hlr_lines_mm(painter: QPainter, frame: MarcoVista, hlr,
     else:
         k = np.asarray(kinds)
         rows = {kind: segs[k == kind]
-                for kind in (KIND_EDGE, KIND_PROFILE, KIND_CUT)}
+                for kind in (KIND_HIDDEN, KIND_EDGE, KIND_PROFILE, KIND_CUT)}
         if budget is not None and len(segs) > budget:
             left = int(budget)
-            for kind in (KIND_CUT, KIND_PROFILE, KIND_EDGE):
+            for kind in (KIND_CUT, KIND_PROFILE, KIND_EDGE, KIND_HIDDEN):
                 take = max(0, min(len(rows[kind]), left))
                 rows[kind] = rows[kind][:take]
                 left -= take
         groups = [(kind, rows[kind])
-                  for kind in (KIND_EDGE, KIND_PROFILE, KIND_CUT)]
+                  for kind in (KIND_HIDDEN, KIND_EDGE, KIND_PROFILE,
+                               KIND_CUT)]
     for kind, rows in groups:
         if not len(rows):
             continue
@@ -755,7 +767,22 @@ def paint_frame_mm(painter: QPainter, frame: MarcoVista,
                           tr("Update the view to render"), 3.5,
                           color=QColor(140, 150, 160))
     elif image is not None and not image.isNull():
-        painter.drawImage(r, image)
+        # Never stretch the picture: draw it at the size it was rendered
+        # for and clip it to the frame, so a frame resized mid-gesture
+        # keeps an undistorted drawing (#80). What no longer fits is
+        # hidden and the new area is paper; when the frame has not
+        # changed since the render the two rects coincide (a 1:1 blit).
+        img_r = QRectF(0, 0, image.width() * 25.4 / RENDER_DPI,
+                       image.height() * 25.4 / RENDER_DPI)
+        if (abs(img_r.width() - r.width()) < 0.1
+                and abs(img_r.height() - r.height()) < 0.1):
+            painter.drawImage(r, image)
+        else:
+            painter.fillRect(r, QColor(255, 255, 255))
+            painter.save()
+            painter.setClipRect(r)
+            painter.drawImage(img_r, image)
+            painter.restore()
     else:
         painter.fillRect(r, QColor(245, 246, 248))
         _draw_text_mm(painter, r.adjusted(2, 2, -2, -2),
@@ -1160,7 +1187,7 @@ def _paint_ground_mm(painter: QPainter, f: FormaItem, a: QPointF,
 def cota_label_anchor(ct: CotaItem) -> tuple:
     """The label's reference point in item space: the dimension line's
     midpoint, moved outside its start or end when ``text_along`` says so,
-    plus the free drag (``text_dx_mm``/``text_dy_mm``) — LayOut lets the
+    plus the free drag (``text_dx_mm``/``text_dy_mm``) — the usual convention lets the
     text box be dragged anywhere, and the line stays put."""
     import math as _math
     (a2x, a2y), (b2x, b2y) = ct.line_points()
@@ -1215,7 +1242,7 @@ def cota_aside_frame(ct: CotaItem) -> tuple:
 
 def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
     """Architect-style dimension: the line runs ``sep_mm`` off the measured
-    points along their normal (LayOut-style), tied back with extension
+    points along their normal, tied back with extension
     lines; oblique ticks / arrows / bare ends; centred label of the REAL
     model distance (paper length × N).
 
@@ -1236,7 +1263,7 @@ def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
     pen.setWidthF(ct.stroke_mm)
     painter.setPen(pen)
     # Extension lines: small gap at the measured point, small overshoot past
-    # the dimension line (the drafting convention LayOut follows). Each one
+    # the dimension line (the usual drafting convention). Each one
     # runs from ITS point to ITS foot, so a cota forced straight over two
     # points at different heights gets extension lines of different lengths
     # — which is the whole point of forcing it.
@@ -1258,7 +1285,7 @@ def paint_cota_mm(painter: QPainter, ct: CotaItem) -> None:
     text_pos = getattr(ct, "text_pos", "above") or "above"
     length = _math.hypot(ct.dx_mm, ct.dy_mm)
     if text_pos == "centered" and cota_label_is_automatic(ct):
-        # The label sits ON the line, which opens around it (LayOut's
+        # The label sits ON the line, which opens around it (the
         # "centered" text position). The opening is the label box's
         # shadow ALONG the line: a horizontal label on a vertical cota
         # only covers its own height there — measuring its width opened
@@ -2185,7 +2212,7 @@ def paint_cajetin_mm(painter: QPainter, c: Cajetin) -> None:
 # ── Canvas items ────────────────────────────────────────────────────────────
 
 class InlineTextEditor(QGraphicsTextItem):
-    """Edit a text block or a label IN PLACE on the sheet (LayOut): the same
+    """Edit a text block or a label IN PLACE on the sheet: the same
     font at the same paper size, over the item; focus-out or Ctrl+Enter
     commits (one undo step), Esc cancels."""
 
@@ -2536,6 +2563,40 @@ class _SheetItem(QGraphicsItem):
 
     RESIZABLE = True
 
+    #: A Ctrl+click on this item is being taken as a selection toggle.
+    _ctrl_toggle = False
+
+    def _owns_ctrl_press(self, pos) -> bool:
+        """Whether a Ctrl+press at ``pos`` is this item's own gesture
+        rather than «add to / remove from the selection»."""
+        return False
+
+    def sceneEvent(self, event) -> bool:
+        """Ctrl+click = add to or remove from the selection, wherever the
+        item is hit (Marco, 24-09: selecting several cotas with Ctrl «es un
+        poco difícil»). A press on a cota's text or on a handle used to
+        select the item itself to start dragging it, and Qt's own Ctrl
+        toggle on release then took it straight back off; a one-pixel
+        wobble counted as a drag and toggled nothing. Taken whole here:
+        press toggles, the rest of the click is swallowed."""
+        t = event.type()
+        if (t == QEvent.GraphicsSceneMousePress
+                and event.button() == Qt.LeftButton
+                and event.modifiers() & Qt.ControlModifier
+                and getattr(self.composer, "tool_mode", "select") == "select"
+                and not self._owns_ctrl_press(event.pos())):
+            self._ctrl_toggle = True
+            self.setSelected(not self.isSelected())
+            event.accept()
+            return True
+        if self._ctrl_toggle and t in (QEvent.GraphicsSceneMouseMove,
+                                       QEvent.GraphicsSceneMouseRelease):
+            if t == QEvent.GraphicsSceneMouseRelease:
+                self._ctrl_toggle = False
+            event.accept()
+            return True
+        return super().sceneEvent(event)
+
     def __init__(self, composer: "ComposerWindow", model) -> None:
         super().__init__()
         self.composer = composer
@@ -2610,8 +2671,10 @@ class _SheetItem(QGraphicsItem):
         n_sel = len(self.composer._selected_sheet_items())
         arrange_slots: dict = {}
         from views.icons import tool_icon
-        for icon, label, slot in self.composer._arrange_entries()[:8]:
+        arrange.setToolTipsVisible(True)
+        for icon, label, tip, slot in self.composer._arrange_entries()[:8]:
             act = arrange.addAction(tool_icon(icon), label)
+            act.setToolTip(tip)
             act.setEnabled(n_sel >= (3 if label.startswith(tr("Distribute"))
                                      else 2))
             arrange_slots[act] = slot
@@ -2789,12 +2852,15 @@ class _SheetItem(QGraphicsItem):
         if self._press_state is None:
             return
         current = {k: getattr(self.model, k) for k in self._press_state}
-        if current != self._press_state:
+        moved = current != self._press_state
+        if moved:
             self.composer.push_geometry_edit(self.model, current,
                                              self._press_state)
         self._press_state = None
         if was_resizing:
             self.composer.on_item_geometry(self, final=True)
+        elif moved:
+            self.composer.on_item_moved(self)
 
     #: True while nudge_selected moves this item by a fixed step: the
     #: magnetic snap of a drag must not swallow a 1 mm arrow-key move.
@@ -2886,7 +2952,7 @@ class FrameItem(_SheetItem):
         self._paint_selection(painter)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        # LayOut: double-click a model viewport to edit its view in place.
+        # Double-click a model viewport to edit its view in place.
         self.composer.begin_view_edit(self)
         event.accept()
 
@@ -2926,7 +2992,7 @@ class TextItem(_SheetItem):
         return r
 
     def mouseDoubleClickEvent(self, event) -> None:
-        # LayOut: double-click a text block to edit it.
+        # Double-click a text block to edit it.
         self.composer.edit_text_item(self)
         event.accept()
 
@@ -3075,6 +3141,11 @@ class EtiquetaCanvasItem(_SheetItem):
                 "ax_mm": m.ax_mm, "ay_mm": m.ay_mm,
                 "anchor_uid": m.anchor_uid, "a_world": m.a_world,
                 "leaders": [dict(ld) for ld in (m.leaders or [])]}
+
+    def _owns_ctrl_press(self, pos) -> bool:
+        """Ctrl-drag on an arrow tip pulls a new leader (below)."""
+        return (not getattr(self.model, "locked", False)
+                and self._spot_at(pos) is not None)
 
     def mousePressEvent(self, event) -> None:
         note = getattr(self.composer, "note_drag_start", None)
@@ -3562,7 +3633,7 @@ class CotaRadialCanvasItem(_SheetItem):
 
 class CotaCanvasItem(_SheetItem):
     def mouseDoubleClickEvent(self, event) -> None:
-        # LayOut: double-click a dimension to edit its text.
+        # Double-click a dimension to edit its text.
         self.composer.edit_cota_text(self)
         event.accept()
 
@@ -3613,7 +3684,7 @@ class CotaCanvasItem(_SheetItem):
 
     def _label_path(self):
         """The label's strip in item space — what a press must hit to drag
-        the TEXT alone (LayOut: «click and drag it by its selection box»),
+        the TEXT alone («click and drag it by its selection box»),
         as opposed to the lines, which drag the whole cota."""
         from PySide6.QtGui import QPainterPath, QTransform
         import math as _math
@@ -3681,7 +3752,7 @@ class CotaCanvasItem(_SheetItem):
 
     def mouseMoveEvent(self, event) -> None:
         if self._text_dragging:
-            # LayOut: the text box goes where the mouse takes it; the
+            # The text box goes where the mouse takes it; the
             # dimension line stays.
             p0, dx0, dy0 = self._text_drag_origin
             self.prepareGeometryChange()
@@ -3770,6 +3841,13 @@ class CotaCanvasItem(_SheetItem):
         self._paint_selection(painter)
 
 
+def _drag_px() -> int:
+    """How far the pointer must travel for a press to count as a drag —
+    the platform's own setting (10 px by default)."""
+    from PySide6.QtWidgets import QApplication
+    return max(4, QApplication.startDragDistance())
+
+
 class ComposerCanvasView(QGraphicsView):
     """The page view: placement clicks/drags for the left-toolbar tools,
     live mm cursor readout, Ctrl+wheel zoom (QGIS habits)."""
@@ -3827,7 +3905,7 @@ class ComposerCanvasView(QGraphicsView):
     #: Tools whose second point Shift locks to the horizontal or the
     #: vertical through the first (Marco, 2026-09-08: «cuando acote para
     #: sacar una distancia me gustaría que apretando Shift me restrinja de
-    #: forma ortogonal» — AutoCAD's Ortho, SketchUp's axis lock).
+    #: forma ortogonal» — AutoCAD's Ortho, an axis lock).
     _ORTHO_TOOLS = frozenset(("linea", "flecha", "terreno"))
 
     #: Tools whose Shift forces the DIMENSION straight instead of moving
@@ -3867,6 +3945,25 @@ class ComposerCanvasView(QGraphicsView):
             dx, dy = abs(b.x() - a.x()), abs(b.y() - a.y())
             return "h" if dx >= dy else "v"
         return ""
+
+    def _straighten_at(self, a, b, pos, mods) -> str:
+        """Shift once both points are down: the CURSOR picks the direction,
+        as AutoCAD's DIMLINEAR does (#104). Pulled out above or below the
+        two points the cota measures horizontally, out to the left or the
+        right it measures vertically — so a cota can go from one to the
+        other, which judging by the points alone never allowed. Diagonally
+        out (as far out one way as the other) keeps what it had."""
+        if not (mods & Qt.ShiftModifier) or a is None or b is None:
+            return ""
+        x0, x1 = sorted((a.x(), b.x()))
+        y0, y1 = sorted((a.y(), b.y()))
+        out_x = max(x0 - pos.x(), pos.x() - x1, 0.0)
+        out_y = max(y0 - pos.y(), pos.y() - y1, 0.0)
+        if out_y > out_x:
+            return "h"
+        if out_x > out_y:
+            return "v"
+        return self._cota_axis or self._straighten(a, b, mods)
 
     @staticmethod
     def _line_ends(a, b, sep: float, axis: str):
@@ -3948,7 +4045,7 @@ class ComposerCanvasView(QGraphicsView):
     _KEEP_MM = 20.0
 
     def update_pan_range(self) -> None:
-        """Let the page be panned anywhere, as in any CAD / LayOut: the
+        """Let the page be panned anywhere, as in any CAD program: the
         scrollable area is the page grown by the viewport on every side, so
         the wheel and the middle button pan even when the whole sheet fits
         the window (Marco, 2026-09-07: «cuando hago pan con la rueda no
@@ -4013,10 +4110,14 @@ class ComposerCanvasView(QGraphicsView):
                 mods = event.modifiers()
                 if event.button() == Qt.LeftButton and mods & Qt.ShiftModifier:
                     mode = "rotate"          # Shift+drag turns the drawing
-                elif (event.button() == Qt.MiddleButton
-                        or mods & Qt.ControlModifier):
+                elif ((event.button() == Qt.MiddleButton
+                        or mods & Qt.ControlModifier)
+                        and not self.composer.view_is_fixed(edit)):
                     mode = "orbit"
                 else:
+                    # A Top or a Front stays one: its panel says what it
+                    # shows, so the hand only slides it (#82, @pacaeiro)
+                    # — and the middle button pans, as on the sheet (#83).
                     mode = "pan"
                 self.composer.start_view_drag(
                     edit, pos, event.position().toPoint(),
@@ -4090,7 +4191,7 @@ class ComposerCanvasView(QGraphicsView):
                 event.button() == Qt.LeftButton and mode == "pan"):
             # Pan the sheet: the middle button anywhere, or the Pan tool.
             self._pan_last = event.position().toPoint()
-            self.setCursor(Qt.ClosedHandCursor)
+            self.viewport().setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
         if mode == "zoom" and event.button() == Qt.LeftButton:
@@ -4116,8 +4217,8 @@ class ComposerCanvasView(QGraphicsView):
             if self._second_pt is not None:
                 # Third click of a dimension: fixes the line separation.
                 if mode in self._STRAIGHT_TOOLS:
-                    self._cota_axis = self._straighten(
-                        self._drag_start, self._second_pt,
+                    self._cota_axis = self._straighten_at(
+                        self._drag_start, self._second_pt, pos,
                         event.modifiers()) or self._cota_axis
                 self._finish_cota(pos)
                 self._ignore_release = True
@@ -4155,7 +4256,7 @@ class ComposerCanvasView(QGraphicsView):
             # objetos con el mouse haciendo un cuadro»): a press on the
             # empty sheet starts a rubber band; the release picks the items
             # it encloses (dragged left→right) or touches (right→left),
-            # SketchUp's window / crossing rule, with the same modifiers as
+            # the usual window / crossing rule, with the same modifiers as
             # the model's Select tool. A tiny box is a plain click.
             self._band_start = self.mapToScene(event.position().toPoint())
             self._band_vp = event.position().toPoint()
@@ -4269,7 +4370,7 @@ class ComposerCanvasView(QGraphicsView):
         if (start_vp is None
                 or (vp - start_vp).manhattanLength() < self._BAND_CLICK_PX):
             # A click on the empty sheet: plain click empties the
-            # selection; with a modifier it leaves it alone (SketchUp).
+            # selection; with a modifier it leaves it alone.
             from tools.select import selection_mode
             if selection_mode(modifiers) == "replace":
                 self.scene().clearSelection()
@@ -4283,6 +4384,13 @@ class ComposerCanvasView(QGraphicsView):
             notify()
 
     def mouseMoveEvent(self, event) -> None:
+        self._mouse_move(event)
+        # An armed tool keeps its cursor over the items too: their hover
+        # cursors (move, resize) belong to Select.
+        if self._pan_last is None and self.composer.tool_mode != "select":
+            self.show_tool_cursor()
+
+    def _mouse_move(self, event) -> None:
         if self._pan_last is not None:
             if not (event.buttons() & (Qt.MiddleButton | Qt.LeftButton)):
                 # The release never came. It does not always: a screenshot,
@@ -4345,10 +4453,13 @@ class ComposerCanvasView(QGraphicsView):
             if mode in self._RUN_TOOLS and self._chain_pts:
                 self._chain_axis = self._straighten(
                     self._chain_pts[-1][0], pos, mods) or self._chain_axis
+            elif self._second_pt is not None:
+                self._cota_axis = self._straighten_at(
+                    self._drag_start, self._second_pt, pos,
+                    mods) or self._cota_axis
             elif self._drag_start is not None:
                 self._cota_axis = self._straighten(
-                    self._drag_start, self._second_pt or pos,
-                    mods) or self._cota_axis
+                    self._drag_start, pos, mods) or self._cota_axis
         if self._chain_pts:
             self._update_chain_preview(pos)
             return True
@@ -4608,6 +4719,10 @@ class ComposerCanvasView(QGraphicsView):
         one a row further out (baseline). A click on the last point, Esc,
         or switching tools ends the run; a chain stacks its total."""
         pts = self._chain_pts
+        if not pts:
+            # The sheet this run belongs to: a rebuild keeps the run, a
+            # change of sheet ends it (forget_scene_items, #187).
+            self._chain_comp = getattr(self.composer, "comp", None)
         if not pts and self._seed_run_from(self._selected_cota()):
             pts = self._chain_pts           # carrying on from a cota: this
             # click is already the next point, so fall through to the tail
@@ -4798,12 +4913,24 @@ class ComposerCanvasView(QGraphicsView):
                      "zoom": Qt.SizeVerCursor, "zoom_ventana": Qt.CrossCursor}
 
     def tool_cursor(self):
-        return self._TOOL_CURSORS.get(self.composer.tool_mode, Qt.ArrowCursor)
+        """The armed tool's cursor: its own, a cross for every tool that
+        places or draws something, the arrow for Select."""
+        mode = self.composer.tool_mode
+        if mode == "select":
+            return Qt.ArrowCursor
+        return self._TOOL_CURSORS.get(mode, Qt.CrossCursor)
+
+    def show_tool_cursor(self) -> None:
+        """On the VIEWPORT, not the view (#79, @pacaeiro: «the cursor is
+        always the Select»): once the pointer has crossed an item with a
+        cursor of its own, QGraphicsView hands the viewport an explicit
+        cursor of its own, and from then on the view's never shows."""
+        self.viewport().setCursor(self.tool_cursor())
 
     def _end_pan(self) -> None:
         """Stop panning and give the cursor back to the armed tool."""
         self._pan_last = None
-        self.setCursor(self.tool_cursor())
+        self.show_tool_cursor()
 
     # ---- zoom tools (the model's Zoom and Zoom Window, on the sheet) ------
 
@@ -4891,9 +5018,15 @@ class ComposerCanvasView(QGraphicsView):
             # A press-and-release on the same spot with a two-point tool is
             # the FIRST click of click-move-click: keep the rubber band (and
             # the snapping) alive until the second click.
+            # The system's drag distance, not 4 px: a hand that moved 5 px
+            # between press and release (a touchpad, a 120 % screen) made
+            # the FIRST click a tiny drag — a minimum-size frame dropped at
+            # once and the second click lost (#95, @pacaeiro: «The 2 clicks
+            # option do not work»).
             if (self.composer.tool_mode in self._two_point
                     and (event.position().toPoint() - self._press_vp
-                         ).manhattanLength() < 4):
+                         ).manhattanLength()
+                    < _drag_px()):
                 event.accept()
                 return
             end, _ = self._snapped(self.mapToScene(event.position().toPoint()))
@@ -4939,6 +5072,46 @@ class ComposerCanvasView(QGraphicsView):
                                      hit_a=hit_a)
         else:
             self.composer.place_tool(start.x(), start.y(), end.x(), end.y())
+
+    def forget_scene_items(self) -> None:
+        """The canvas is about to be cleared: let go of the preview, the snap
+        marker and the rubber band — they die with it — but KEEP the points
+        of a placement in progress. Every rebuild used to drop the placement
+        instead, and a rebuild between the two clicks is ordinary: the view
+        just drawn finishes its render, a field refreshes… so the first
+        click of «two clicks» was lost and nothing was placed (#95,
+        @pacaeiro: still in 0.5.2 for views and arrows). The next mouse
+        move draws the rubber band again.
+
+        A chain (or baseline) run survives too (#187, tonfdd). It used to be
+        finished here «because it holds placed items» — but placing each of
+        its cotas goes through the history, which rebuilds the canvas, so a
+        chain never lived past its first segment and its total was never
+        stacked. What it holds are the DOCUMENT's cotas and frames, which
+        outlive the canvas: it only ends when the sheet itself changes, and
+        a cota undone meanwhile drops out of it."""
+        if self._chain_pts or self._chain_cotas:
+            comp = getattr(self.composer, "comp", None)
+            if comp is None or comp is not getattr(self, "_chain_comp", comp):
+                self.cancel_placement()          # another sheet / document
+                return
+            live = {id(c) for c in comp.cotas}
+            kept = [c for c in self._chain_cotas if id(c) in live]
+            if len(kept) != len(self._chain_cotas):
+                # An undo took a segment back: the points after it go too,
+                # so the next click continues from where the chain now ends.
+                self._chain_cotas = kept
+                n = len(kept) + 1 if kept else 0
+                self._chain_pts = self._chain_pts[:max(n, 0)]
+                if not kept:
+                    self._chain_sep = None
+                    self._chain_pts = []
+        self._preview = None
+        self._snap_marker = None
+        self._band_item = None
+        self._band_start = None
+        self._band_vp = None
+        self._band_zoom = False
 
     def cancel_placement(self) -> None:
         """Drop an in-progress two-point placement (Esc / tool switch); a
@@ -5009,6 +5182,21 @@ class ComposerCanvasView(QGraphicsView):
                 actions["select"].setChecked(True)
             event.accept()
             return
+        if (event.key() == Qt.Key_Space and not editing
+                and not event.isAutoRepeat()
+                and not event.modifiers() & ~Qt.KeypadModifier
+                and hasattr(self.composer, "_set_tool_mode")):
+            # Space = Select, as in the model: it ends whatever
+            # is being placed — a chain of dimensions is finished, as Esc
+            # does — and puts the arrow back (#83, @pacaeiro: «in Model
+            # view Space ends a command, in Sheet Composer it is Esc»).
+            self.cancel_placement()
+            self.composer._set_tool_mode("select")
+            actions = getattr(self.composer, "_tool_actions", {})
+            if "select" in actions:
+                actions["select"].setChecked(True)
+            event.accept()
+            return
         arrows = {Qt.Key_Left: (-1.0, 0.0), Qt.Key_Right: (1.0, 0.0),
                   Qt.Key_Up: (0.0, -1.0), Qt.Key_Down: (0.0, 1.0)}
         if (event.key() in arrows and not editing
@@ -5027,7 +5215,7 @@ class ComposerCanvasView(QGraphicsView):
                 event.accept()
                 return
         if event.key() == Qt.Key_Escape and self.scene() is not None:
-            # LayOut / SketchUp: Esc drops the selection.
+            # Esc drops the selection.
             self.scene().clearSelection()
             notify = getattr(self.composer, "on_selection_changed", None)
             if notify is not None:
@@ -5044,11 +5232,36 @@ class ComposerWindow(QMainWindow):
     right. Compositions live in ``scene.compositions`` and persist in the
     .igz; every mutation goes through the composer's own undo history."""
 
+    def _apply_desk_colour(self) -> None:
+        """The desk behind the sheet: slate on the dark chrome, a soft grey
+        on the light one — slate there glared against the white paper
+        (Marco, 2026-09-22)."""
+        dark = self.palette().color(QPalette.Window).lightness() < 128
+        self._view.setBackgroundBrush(QColor(70, 76, 84) if dark
+                                      else QColor(200, 204, 210))
+
+    def changeEvent(self, event) -> None:
+        # The chrome flipped light/dark (views/theme.py): the desk follows.
+        if event.type() in (QEvent.ApplicationPaletteChange,
+                            QEvent.PaletteChange) and hasattr(self, "_view"):
+            self._apply_desk_colour()
+        super().changeEvent(event)
+
     def __init__(self, main_window) -> None:
         super().__init__(main_window)
         self.setWindowFlag(Qt.Window, True)
         self._window = main_window
-        # Auto-render (LayOut's "Auto"): the viewport announces every model
+        import sys as _sys
+        if _sys.platform == "darwin":
+            # macOS has ONE menu bar, and a window without its own shows its
+            # parent's: the model's menus — and their key equivalents — stayed
+            # live over the composer, so Cmd+0 blanked the model window
+            # (#114) and Cmd+Z / Cmd+C / Cmd+V would have acted on the model
+            # too. A menu bar of its own (empty) hands the keys back to the
+            # composer's shortcuts.
+            from PySide6.QtWidgets import QMenuBar
+            self.setMenuBar(QMenuBar(self))
+        # Auto-render ("Auto"): the viewport announces every model
         # version; stale frames get a badge and, when auto is on and the
         # window is visible, the raster ones re-render by themselves after a
         # short quiet period. Vector frames (seconds each) wait for Update.
@@ -5073,7 +5286,7 @@ class ComposerWindow(QMainWindow):
         self.hlr_cache: dict[int, object] = {}
         self.hlr_kinds: dict[int, object] = {}     # line class per segment
         self.hlr_fills: dict[int, object] = {}     # section-cut rings, mm
-        self.snap_cache: dict[int, object] = {}   # frame → page-mm snap pts
+        self.snap_cache: dict[int, object] = {}   # frame → (page stamp, snap pts)
         self.circle_cache: dict[int, list] = {}   # frame → page-mm circles
         self.annot_cache: dict[int, list] = {}    # frame → model annotations
         self._images: dict[str, QImage] = {}
@@ -5094,8 +5307,8 @@ class ComposerWindow(QMainWindow):
         view = ComposerCanvasView(self.canvas, self)
         view.setRenderHints(QPainter.Antialiasing
                             | QPainter.SmoothPixmapTransform)
-        view.setBackgroundBrush(QColor(70, 76, 84))
         self._view = view
+        self._apply_desk_colour()
         # Factory arrangement (Marco, 2026-09-14: «como están organizados
         # ahora es la que será por defecto»): the sheet-item tools down the
         # left; along the top, Sheet, then Draw, then Arrange — shown.
@@ -5107,7 +5320,8 @@ class ComposerWindow(QMainWindow):
         from PySide6.QtCore import QSettings
         from PySide6.QtWidgets import QSplitter
         split = QSplitter(Qt.Horizontal)
-        split.addWidget(self._build_canvas_area(view))
+        self._canvas_area = self._build_canvas_area(view)
+        split.addWidget(self._canvas_area)
         split.addWidget(panel)
         split.setStretchFactor(0, 1)      # the canvas absorbs resizes
         split.setStretchFactor(1, 0)
@@ -5149,9 +5363,8 @@ class ComposerWindow(QMainWindow):
         # derecha, antes de las x y y»).
         self.auto_check = QCheckBox(tr("Auto-render"))
         self.auto_check.setToolTip(tr(
-            "Re-render the views by themselves when the model changes "
-            "(LayOut's Auto). Vector views keep their badge and wait for "
-            "Update."))
+            "Re-render the views by themselves when the model changes. "
+            "Vector views keep their badge and wait for Update."))
         self.auto_check.setChecked(self._auto_render)
         self.auto_check.toggled.connect(self._set_auto_render)
         self.statusBar().addPermanentWidget(self.auto_check)
@@ -5189,6 +5402,14 @@ class ComposerWindow(QMainWindow):
         # autoguardado o el icono de guardar en composiciones»).
         QShortcut(QKeySequence.Save, self, activated=self.save_document)
         QShortcut(QKeySequence.SaveAs, self, activated=self.save_document_as)
+        # Ctrl+Tab: back to the model (#91, @pacaeiro); Ctrl+PgUp / PgDn:
+        # the sheet before / after, as Calc walks its sheets.
+        for seq in ("Ctrl+Tab", "Ctrl+Shift+Tab"):
+            QShortcut(QKeySequence(seq), self, activated=self._show_model)
+        QShortcut(QKeySequence("Ctrl+PgUp"), self,
+                  activated=lambda: self.step_sheet(-1))
+        QShortcut(QKeySequence("Ctrl+PgDown"), self,
+                  activated=lambda: self.step_sheet(1))
 
         self._rebuild_canvas()
 
@@ -5280,6 +5501,23 @@ class ComposerWindow(QMainWindow):
          "the value, as the standard asks", False),
     )
 
+    #: The tools' names — their text in F3 and wherever an action is
+    #: listed. The long sentence of TOOLS is the tooltip: as a name it was
+    #: F3's row, cut off halfway (Marco, 2026-09-28).
+    TOOL_NAMES = {
+        "select": "Select", "pan": "Pan", "zoom": "Zoom",
+        "zoom_ventana": "Zoom window", "estilo": "Format painter",
+        "vista": "Model view", "texto": "Text", "etiqueta": "Label",
+        "nivel": "Level mark", "llamada": "Detail callout", "imagen": "Image",
+        "cajetin": "Title block", "escala": "Scale bar",
+        "norte": "North arrow", "leyenda": "Layer legend",
+        "perfil": "Terrain profile", "linea": "Line", "flecha": "Arrow",
+        "terreno": "Ground line", "rect": "Rectangle", "elipse": "Ellipse",
+        "poligono": "Polygon", "cota": "Dimension",
+        "cota_cadena": "Chain dimension", "cota_base": "Baseline dimension",
+        "cota_ang": "Angular dimension", "cota_radio": "Radius dimension",
+    }
+
     def set_toolbar_icon_size(self, px: int) -> None:
         """Every toolbar of the composer at ``px`` (Preferences ▸ General)."""
         from PySide6.QtWidgets import QToolBar
@@ -5289,7 +5527,7 @@ class ComposerWindow(QMainWindow):
     #: The drawing tools go on a bar of their own along the TOP: 23 tools in
     #: one vertical bar at 32 px ran past a laptop's 768 px and the last
     #: ones vanished behind the overflow chevron (Marco, 2026-09-14). The
-    #: sheet-item tools (14) stay at the left, as in LayOut.
+    #: sheet-item tools (14) stay at the left, the usual convention for sheets.
     DRAW_TOOLS = ("linea", "flecha", "terreno", "rect", "elipse", "poligono",
                   "cota", "cota_cadena", "cota_base", "cota_ang",
                   "cota_radio")
@@ -5299,17 +5537,22 @@ class ComposerWindow(QMainWindow):
         from PySide6.QtWidgets import QToolBar
         from views.icons import tool_icon
         tb = QToolBar(tr("Composer tools"), self)
+        tb.toggleViewAction().setStatusTip(tr("Show or hide this toolbar."))
         tb.setObjectName("composer_tools")
         tb.setOrientation(Qt.Vertical)
         tb.setIconSize(QSize(toolbar_icon_px(), toolbar_icon_px()))
         draw = QToolBar(tr("Draw"), self)
+        draw.toggleViewAction().setStatusTip(tr("Show or hide this toolbar."))
         draw.setObjectName("composer_draw")
         draw.setIconSize(QSize(toolbar_icon_px(), toolbar_icon_px()))
         group = QActionGroup(self)
         group.setExclusive(True)
         self._tool_actions = {}
         for mode, icon_key, tip, _drag in self.TOOLS:
-            act = QAction(tool_icon(icon_key), tr(tip), self)
+            act = QAction(tool_icon(icon_key),
+                          tr(self.TOOL_NAMES.get(mode, tip)), self)
+            act.setToolTip(tr(tip))
+            act.setProperty("icon_key", icon_key)   # redrawn on theme change
             act.setCheckable(True)
             act.setChecked(mode == "select")
             act.triggered.connect(
@@ -5330,7 +5573,7 @@ class ComposerWindow(QMainWindow):
             self._view.cancel_placement()
         self.tool_mode = mode
         if hasattr(self, "_view"):
-            self._view.setCursor(self._view.tool_cursor())
+            self._view.show_tool_cursor()
         if mode == "estilo":
             # The format painter starts by taking a style: the first click
             # copies, every later click pastes.
@@ -5771,7 +6014,7 @@ class ComposerWindow(QMainWindow):
             "{autor} {lamina} {escala} {escena} {fecha} {archivo} {hoja} "
             "{total}"))
         fields_note.setWordWrap(True)
-        fields_note.setStyleSheet("color: #8a94a0; font-size: 11px;")
+        theme_style(fields_note, "color:{muted}; font-size: 11px;")
         dis_lay.addWidget(fields_note)
 
         # Page
@@ -5824,13 +6067,66 @@ class ComposerWindow(QMainWindow):
         dis_lay.addStretch(1)
         self._tabs.addTab(dis, tr("Layout"))
 
-        # -- tab Elementos: the item list
-        from PySide6.QtWidgets import QListWidget
+        # -- tab Elementos: the item list — names of one's own and folders
+        # by type (issue #93, @pacaeiro). Its own tab, the properties in the
+        # next one: Marco tried the list and the properties sharing one tab
+        # (two scrolls), folded and floating, and kept separate tabs.
+        from PySide6.QtWidgets import QAbstractItemView, QTreeWidget
         ele = QWidget()
         ele_lay = QVBoxLayout(ele)
-        self.items_list = QListWidget()
+        self.items_group_check = QCheckBox(tr("Group by type"))
+        self.items_group_check.setToolTip(tr(
+            "Show the items in folders — views, annotations, dimensions, "
+            "graphics — instead of one list in stacking order."))
+        from PySide6.QtCore import QSettings as _QS
+        self.items_group_check.setChecked(
+            str(_QS().value("composer/items_grouped", "0")) == "1")
+        self.items_group_check.toggled.connect(self._on_items_grouping)
+        self.items_list = QTreeWidget()
+        # QGIS's Items panel: an eye and a padlock per item, then its name.
+        self.items_list.setColumnCount(3)
+        self.items_list.setHeaderLabels(["👁", "🔒", tr("Item")])
+        head = self.items_list.header()
+        head.setStretchLastSection(True)
+        from PySide6.QtWidgets import QHeaderView
+        head.setSectionResizeMode(0, QHeaderView.Fixed)
+        head.setSectionResizeMode(1, QHeaderView.Fixed)
+        head.resizeSection(0, 30)
+        head.resizeSection(1, 30)
+        self.items_list.headerItem().setToolTip(0, tr("Visible"))
+        self.items_list.headerItem().setToolTip(1, tr("Locked"))
+        # The folders' arrows and indentation go with the NAME, so the eye
+        # and the padlock stay lined up on the left whatever the grouping.
+        self.items_list.setTreePosition(2)
+        self.items_list.setRootIsDecorated(False)
+        # A file manager's habits (Marco, 26-09: «cuando seleccione uno de
+        # la lista debería llevarme a las propiedades»): a click selects and
+        # stays, a double-click opens the item's properties, F2 or the
+        # right-click menu renames. Only the name column is ever typed
+        # into; the eye and the padlock are plain check boxes.
+        self.items_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.items_list.itemDoubleClicked.connect(
+            lambda row, col: (row.data(0, Qt.UserRole) is not None
+                              and col == 2 and self._open_item_properties()))
+        self.items_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.items_list.customContextMenuRequested.connect(
+            self._items_context_menu)
+        from PySide6.QtGui import QShortcut as _QShortcut
+        f2 = _QShortcut(QKeySequence(Qt.Key_F2), self.items_list)
+        f2.setContext(Qt.WidgetShortcut)
+        f2.activated.connect(
+            lambda: (self.items_list.currentItem() is not None
+                     and self.items_list.currentItem().data(0, Qt.UserRole)
+                     is not None
+                     and self.items_list.editItem(
+                         self.items_list.currentItem(), 2)))
+        self.items_list.setToolTip(tr(
+            "Double-click: the item's properties. F2 or right-click: rename "
+            "it (an empty name goes back to the automatic one)."))
         self.items_list.itemSelectionChanged.connect(self._on_list_select)
-        ele_lay.addWidget(self.items_list)
+        self.items_list.itemChanged.connect(self._on_item_renamed)
+        ele_lay.addWidget(self.items_group_check)
+        ele_lay.addWidget(self.items_list, 1)
         self._tabs.addTab(ele, tr("Items"))
 
         # -- tab Propiedades: per-type pages
@@ -5963,12 +6259,14 @@ class ComposerWindow(QMainWindow):
         from PySide6.QtWidgets import QToolBar
         from views.icons import tool_icon
         tb = QToolBar(tr("Sheet"), self)
+        tb.toggleViewAction().setStatusTip(tr("Show or hide this toolbar."))
         tb.setObjectName("sheet_toolbar")
         tb.setToolButtonStyle(Qt.ToolButtonIconOnly)   # icons, like the tools
         tb.setIconSize(QSize(toolbar_icon_px(), toolbar_icon_px()))
 
         def act(icon, text, tip, slot):
             a = QAction(tool_icon(icon), text, self)
+            a.setProperty("icon_key", icon)
             a.setToolTip(tip)
             a.triggered.connect(lambda _c: slot())
             tb.addAction(a)
@@ -6060,7 +6358,7 @@ class ComposerWindow(QMainWindow):
         self.fov_spin.setToolTip(tr(
             "Field of view, like a lens: 35° is a long lens that keeps the "
             "lines calm, 60–75° is the wide angle that takes a whole "
-            "courtyard in from inside it. SketchUp's default is 35°."))
+            "courtyard in from inside it."))
         self.fov_spin.valueChanged.connect(self._on_frame_perspective)
         _row(self._persp_rows, tr("Field of view"), self.fov_spin)
         self.shadow_combo = QComboBox()
@@ -6110,7 +6408,7 @@ class ComposerWindow(QMainWindow):
         self.fh_spin.valueChanged.connect(self._on_frame_props)
         form.addRow(tr("Frame height"), self.fh_spin)
         self.style_combo = QComboBox()
-        # The model's display styles, one to one (SketchUp: LayOut viewports
+        # The model's display styles, one to one (sheet viewports
         # pick any style). "Model style" = whatever is active in the model;
         # legacy "tecnico"/"lineas" frames map onto Hidden line / Wireframe.
         from core.style import BUILTIN_STYLES, user_styles
@@ -6136,7 +6434,7 @@ class ComposerWindow(QMainWindow):
         self.title_check = QCheckBox(tr("View title"))
         self.title_check.setToolTip(tr(
             "The label of the view: a numbered bubble, the title and the "
-            "scale over a rule (LayOut), a vertical bar beside the frame, "
+            "scale over a rule, a vertical bar beside the frame, "
             "or a plain centred line. Fields like {escala}, {lamina} and "
             "{escena} expand."))
         self.title_check.toggled.connect(self._on_frame_props)
@@ -6196,9 +6494,8 @@ class ComposerWindow(QMainWindow):
         _row(self._title_rows, tr("Title size"), self.title_mm_spin)
         self.annot_check = QCheckBox(tr("Model annotations"))
         self.annot_check.setToolTip(tr(
-            "Draw the model's own cotas and texts in this frame, like "
-            "LayOut does with SketchUp's. Hide their layer in the scene "
-            "to leave them out."))
+            "Draw the model's own cotas and texts in this frame. Hide "
+            "their layer in the scene to leave them out."))
         self.annot_check.toggled.connect(self._on_frame_props)
         form.addRow(self.annot_check)
         self.annot_mm_spin = QDoubleSpinBox()
@@ -6272,8 +6569,7 @@ class ComposerWindow(QMainWindow):
             "Lines where the section plane cuts through a solid."))
         _row(self._pen_rows, tr("Section cut"), self.pen_cut_spin)
         self.pen_profile_spin = _pen_spin(0.35, tr(
-            "Silhouettes and outlines against the background — SketchUp's "
-            "Profiles."))
+            "Silhouettes and outlines against the background."))
         _row(self._pen_rows, tr("Profiles"), self.pen_profile_spin)
         self._pen_rows_raster.append(self._pen_rows[-1])
         self.pen_edge_spin = _pen_spin(0.18, tr(
@@ -6286,6 +6582,12 @@ class ComposerWindow(QMainWindow):
             "Off, every edge uses the Edges pen (recomputes the view)."))
         self.profiles_check.toggled.connect(self._on_frame_pens)
         _row(self._pen_rows, None, self.profiles_check)
+        self.hidden_check = QCheckBox(tr("Hidden lines (dashed)"))
+        self.hidden_check.setToolTip(tr(
+            "Edges behind the model's faces, thin and dashed — the standard "
+            "of a technical drawing (recomputes the view)."))
+        self.hidden_check.toggled.connect(self._on_frame_pens)
+        _row(self._pen_rows, None, self.hidden_check)
         self.cut_fill_combo = QComboBox()
         self.cut_fill_combo.addItem(tr("Solid"), "solid")
         self.cut_fill_combo.addItem(tr("Hatched 45°"), "hatch")
@@ -6328,7 +6630,7 @@ class ComposerWindow(QMainWindow):
         fit_btn = QPushButton(tr("Frame the model"))
         fit_btn.setToolTip(tr(
             "Centre the whole model in the frame at the largest common "
-            "scale that fits (LayOut's Zoom Extents). Double-click the "
+            "scale that fits. Double-click the "
             "frame to pan, orbit, zoom and (with Shift) turn the view by "
             "hand."))
         fit_btn.clicked.connect(self._on_zoom_extents_selected)
@@ -6496,15 +6798,14 @@ class ComposerWindow(QMainWindow):
             label.setVisible(visible)
 
     def _pick_forma_color(self, attr: str, button) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if not isinstance(item, FormaCanvasItem):
             return
-        col = QColorDialog.getColor(QColor(getattr(item.model, attr)),
+        col = get_color(QColor(getattr(item.model, attr)),
                                     self, tr("Colour"))
         if col.isValid():
             self._panel_edit(item, {attr: col.name()})
-            button.setStyleSheet(f"background: {col.name()};")
+            button.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
 
     def _page_cota(self) -> QWidget:
         w = QWidget()
@@ -6599,7 +6900,7 @@ class ComposerWindow(QMainWindow):
         form.addRow(tr("Along the line"), self.cota_text_along)
         self.cota_text_reset = QPushButton(tr("Put the text back"))
         self.cota_text_reset.setToolTip(tr(
-            "The label can be dragged anywhere with the mouse (LayOut): "
+            "The label can be dragged anywhere with the mouse: "
             "grab it by its text. This returns it to its automatic spot."))
         self.cota_text_reset.clicked.connect(self._on_cota_text_reset)
         form.addRow("", self.cota_text_reset)
@@ -7296,6 +7597,16 @@ class ComposerWindow(QMainWindow):
         self.activateWindow()
         self._refresh_sheet_tabs()
 
+    def step_sheet(self, step: int) -> None:
+        """The sheet ``step`` places before or after this one — no
+        wrap-around, as in Calc."""
+        comps = self._scene().compositions
+        if self.comp not in comps:
+            return
+        i = comps.index(self.comp) + step
+        if 0 <= i < len(comps):
+            self.show_sheet(i)
+
     def _new_sheet_tab(self) -> None:
         """The «+» tab: a new sheet, shown here."""
         self._on_comp_add()
@@ -7433,7 +7744,7 @@ class ComposerWindow(QMainWindow):
         new = menu.addAction(tr("New sheet"))
         chosen = menu.exec(global_pos)
         if chosen is rename:
-            name, ok = QInputDialog.getText(parent, tr("Rename sheet…"),
+            name, ok = _prompts.get_text(parent, tr("Rename sheet…"),
                                             tr("Sheet name:"), text=sheet.name)
             if ok:
                 self.rename_sheet(index, name)
@@ -7461,7 +7772,7 @@ class ComposerWindow(QMainWindow):
         # mid-placement (undo between the two clicks is routine). Drop the
         # placement first or the next mouse move touches dead C++ objects.
         if hasattr(self, "_view"):
-            self._view.cancel_placement()
+            self._view.forget_scene_items()
         # Likewise the frame whose view is being edited in place: its item
         # dies with the canvas, and ending the edit afterwards (the next
         # double-click does) would touch a deleted C++ object.
@@ -7529,6 +7840,11 @@ class ComposerWindow(QMainWindow):
             self.canvas.addItem(LlamadaCanvasItem(self, ll))
         if self.comp.cajetin is not None:
             self.canvas.addItem(CajetinItem(self, self.comp.cajetin))
+        # Hidden from the Items list's eye: not drawn, not picked (#93).
+        for it in self.canvas.items():
+            if isinstance(it, _SheetItem) and getattr(it.model, "hidden",
+                                                      False):
+                it.setVisible(False)
         if keep:
             for it in self.canvas.items():
                 if isinstance(it, _SheetItem) and any(it.model is m for m in keep):
@@ -7544,10 +7860,22 @@ class ComposerWindow(QMainWindow):
         self.on_selection_changed()
 
     def _selected_item(self) -> Optional[_SheetItem]:
+        """The selected item the panel speaks for: the one it already
+        shows while that one stays selected, else the first. Qt hands
+        ``selectedItems()`` back in no set order — with several cotas
+        selected the panel was filled from one and the edit landed on
+        another, which took ALL the first one's values (its offset, its
+        axis) and jumped (Marco, 24-09: «algunas cotas cambian de
+        ubicación»)."""
+        shown = getattr(self, "_panel_model", None)
+        first = None
         for it in self.canvas.selectedItems():
             if isinstance(it, _SheetItem):
-                return it
-        return None
+                if it.model is shown:
+                    return it
+                if first is None:
+                    first = it
+        return first
 
     def on_selection_changed(self) -> None:
         if self._updating:
@@ -7635,6 +7963,8 @@ class ComposerWindow(QMainWindow):
                     float(getattr(f, "pen_edge_mm", 0.18) or 0.18))
                 self.profiles_check.setChecked(
                     bool(getattr(f, "profiles", True)))
+                self.hidden_check.setChecked(
+                    bool(getattr(f, "hidden_lines", False)))
                 fidx = self.cut_fill_combo.findData(
                     getattr(f, "cut_fill", "solid") or "solid")
                 self.cut_fill_combo.setCurrentIndex(max(fidx, 0))
@@ -7826,7 +8156,7 @@ class ComposerWindow(QMainWindow):
                 self.et_arrow.setChecked(m.arrow)
                 self.et_dot.setChecked(bool(getattr(m, "dot", True)))
                 self.et_stroke.setValue(m.stroke_mm)
-                self.et_color_btn.setStyleSheet(f"background: {m.color};")
+                self.et_color_btn.setStyleSheet(f"QAbstractButton {{ background: {m.color}; }}")
                 self.et_bg_check.setChecked(bool(m.bg_color))
                 self.et_bg_btn.setStyleSheet(
                     f"background: {m.bg_color};" if m.bg_color else "")
@@ -7842,7 +8172,7 @@ class ComposerWindow(QMainWindow):
                 self.ll_shape.setCurrentIndex(max(sidx, 0))
                 self.ll_size.setValue(float(m.size_mm))
                 self.ll_stroke.setValue(float(m.stroke_mm))
-                self.ll_color_btn.setStyleSheet(f"background: {m.color};")
+                self.ll_color_btn.setStyleSheet(f"QAbstractButton {{ background: {m.color}; }}")
                 self.ll_follow.setChecked(bool(m.follow))
                 self.ll_follow.setEnabled(bool(m.frame_uid))
                 self.props.setCurrentIndex(14)
@@ -7864,7 +8194,7 @@ class ComposerWindow(QMainWindow):
                 self.nv_line.setValue(float(m.line_mm))
                 self.nv_mirror.setChecked(bool(m.mirror))
                 self.nv_stroke.setValue(float(m.stroke_mm))
-                self.nv_color_btn.setStyleSheet(f"background: {m.color};")
+                self.nv_color_btn.setStyleSheet(f"QAbstractButton {{ background: {m.color}; }}")
                 self.props.setCurrentIndex(13)
             elif isinstance(item, PerfilItem):
                 m = item.model
@@ -7902,7 +8232,7 @@ class ComposerWindow(QMainWindow):
                 eidx = self.crad_ends.findData(m.ends)
                 self.crad_ends.setCurrentIndex(max(eidx, 0))
                 self.crad_stroke.setValue(m.stroke_mm)
-                self.crad_color_btn.setStyleSheet(f"background: {m.color};")
+                self.crad_color_btn.setStyleSheet(f"QAbstractButton {{ background: {m.color}; }}")
                 self.props.setCurrentIndex(15)
             elif isinstance(item, CotaAngularCanvasItem):
                 m = item.model
@@ -7913,7 +8243,7 @@ class ComposerWindow(QMainWindow):
                 eidx = self.cang_ends.findData(m.ends)
                 self.cang_ends.setCurrentIndex(max(eidx, 0))
                 self.cang_stroke.setValue(m.stroke_mm)
-                self.cang_color_btn.setStyleSheet(f"background: {m.color};")
+                self.cang_color_btn.setStyleSheet(f"QAbstractButton {{ background: {m.color}; }}")
                 self.cang_text_color_btn.setStyleSheet(
                     f"background: {m.text_color or m.color};")
                 abg = getattr(m, "text_bg", "") or ""
@@ -7925,7 +8255,11 @@ class ComposerWindow(QMainWindow):
                 self.props.setCurrentIndex(10)
             else:
                 self.props.setCurrentIndex(0)
-            if item is not None and fresh and hasattr(self, "_tabs"):
+            if (item is not None and fresh and hasattr(self, "_tabs")
+                    and not getattr(self, "_picking_from_list", False)):
+                # A pick on the sheet jumps to the properties; one made in
+                # the Items list stays there, or a double-click to rename
+                # would never reach its second click (#93).
                 self._tabs.setCurrentIndex(2)     # jump to properties
             self._sync_items_list(item)
         finally:
@@ -8084,14 +8418,49 @@ class ComposerWindow(QMainWindow):
 
     def on_item_geometry(self, item: _SheetItem, final: bool = False) -> None:
         if isinstance(item, FrameItem) and final:
-            self._forget_frame(item.model)
-            item.update()
+            self._on_view_resized(item)
         if isinstance(item, FrameItem) and not self._updating \
                 and item is self._selected_item():
             self._updating = True
             self.fw_spin.setValue(item.model.w_mm)
             self.fh_spin.setValue(item.model.h_mm)
             self._updating = False
+
+    def on_item_moved(self, item: _SheetItem) -> None:
+        """A finished move: the picture travels with the frame (paint_frame_mm
+        draws it from the frame's millimetres), but everything the frame caches
+        in PAGE millimetres -- snap points, circles, vector lines, annotations
+        -- was measured from the OLD spot, and Dimension kept catching the
+        vertices where the frame used to be. A move changes no size, so there
+        is nothing to re-render: the resize's sibling, minus the auto pass."""
+        if not isinstance(item, FrameItem):
+            return
+        frame = item.model
+        image = self.render_cache.get(id(frame))
+        self._forget_frame(frame)          # every page-mm cache is stale now
+        if image is not None:
+            self.render_cache[id(frame)] = image   # ... but not the picture
+        item.update()
+
+    def _on_view_resized(self, item: FrameItem) -> None:
+        """A finished resize must not blank the frame (#80: the user was told to
+        Update after every corner drag). Everything the frame caches in PAGE
+        millimetres -- snap points, circles, vector lines, annotations -- was
+        projected through its OLD size and has to go, or Dimension keeps
+        catching the vertices where they used to be. The picture is the one
+        exception: it stays, cropped to the new frame by paint_frame_mm, and
+        the 400 ms auto timer renders it again off the release; with
+        Auto-render off the badge asks for it."""
+        frame = item.model
+        image = self.render_cache.get(id(frame))
+        self._forget_frame(frame)          # every page-mm cache is stale now
+        if image is not None:
+            self.render_cache[id(frame)] = image   # ... but not the picture
+        self._stale.add(id(frame))
+        self.refresh_items()               # the stale badge is painted here
+        item.update()
+        if self._auto_render and self.isVisible():
+            self._auto_timer.start()       # 400 ms: off the release, coalesced
 
     # ---- Sheet templates (QGIS layout templates) ------------------------------
     @staticmethod
@@ -8190,7 +8559,7 @@ class ComposerWindow(QMainWindow):
         if chosen is None:
             return
         if chosen is save:
-            name, ok = QInputDialog.getText(
+            name, ok = _prompts.get_text(
                 self, tr("Save template"), tr("Template name:"),
                 text=self.comp.name)
             if ok and name.strip():
@@ -8277,6 +8646,9 @@ class ComposerWindow(QMainWindow):
                                       if isinstance(c, EditItemCommand)])
         self.history.execute(cmd, notify=False)
         self._mark_dirty()
+        for it in items:                   # arrow keys are a move too: the
+            if isinstance(it, FrameItem):  # page-mm caches are just as stale
+                self.on_item_moved(it)
         if follow:
             keep = [it.model for it in items]
             self._rebuild_canvas()
@@ -8600,26 +8972,57 @@ class ComposerWindow(QMainWindow):
             tr("{n} item(s) pasted.", n=len(pasted)), 3000)
 
     def _arrange_entries(self) -> list:
-        """(icon key, label, slot) of the Arrange commands — the toolbar and
-        the items' right-click menu share them. Align needs two selected
-        items, distribute three; group / lock / duplicate have keys."""
+        """(icon key, label, what it does, slot) of the Arrange commands —
+        the toolbar and the items' right-click menu share them. Align needs
+        two selected items, distribute three; group / lock / duplicate have
+        keys."""
         return [
-            ("arr_left", tr("Align left"), lambda: self.align_selected("left")),
-            ("arr_right", tr("Align right"), lambda: self.align_selected("right")),
-            ("arr_top", tr("Align top"), lambda: self.align_selected("top")),
-            ("arr_bottom", tr("Align bottom"), lambda: self.align_selected("bottom")),
+            ("arr_left", tr("Align left"),
+             tr("Line up the left edges of the selected items with the "
+                "leftmost one."),
+             lambda: self.align_selected("left")),
+            ("arr_right", tr("Align right"),
+             tr("Line up the right edges of the selected items with the "
+                "rightmost one."),
+             lambda: self.align_selected("right")),
+            ("arr_top", tr("Align top"),
+             tr("Line up the top edges of the selected items with the "
+                "highest one."),
+             lambda: self.align_selected("top")),
+            ("arr_bottom", tr("Align bottom"),
+             tr("Line up the bottom edges of the selected items with the "
+                "lowest one."),
+             lambda: self.align_selected("bottom")),
             ("arr_hcenter", tr("Center horizontally"),
+             tr("Line up the centres of the selected items on one vertical "
+                "line, in the middle of the selection."),
              lambda: self.align_selected("hcenter")),
             ("arr_vcenter", tr("Center vertically"),
+             tr("Line up the centres of the selected items on one "
+                "horizontal line, in the middle of the selection."),
              lambda: self.align_selected("vcenter")),
             ("arr_dist_h", tr("Distribute horizontally"),
+             tr("Space three or more selected items evenly from left to "
+                "right."),
              lambda: self.distribute_selected("x")),
             ("arr_dist_v", tr("Distribute vertically"),
+             tr("Space three or more selected items evenly from top to "
+                "bottom."),
              lambda: self.distribute_selected("y")),
-            ("arr_duplicate", tr("Duplicate (Ctrl+D)"), self.duplicate_selected),
-            ("arr_group", tr("Group (Ctrl+G)"), self.group_selected),
-            ("arr_ungroup", tr("Ungroup (Ctrl+Shift+G)"), self.ungroup_selected),
-            ("arr_lock", tr("Lock / unlock (Ctrl+L)"), self.lock_selected)]
+            ("arr_duplicate", tr("Duplicate (Ctrl+D)"),
+             tr("Place a copy of the selected items a little below and to "
+                "the right."),
+             self.duplicate_selected),
+            ("arr_group", tr("Group (Ctrl+G)"),
+             tr("Join the selected items into a group that moves as one."),
+             self.group_selected),
+            ("arr_ungroup", tr("Ungroup (Ctrl+Shift+G)"),
+             tr("Break the selected group back into its items."),
+             self.ungroup_selected),
+            ("arr_lock", tr("Lock / unlock (Ctrl+L)"),
+             tr("Lock the selected items so they cannot be moved by "
+                "accident; when they all are locked, unlock them."),
+             self.lock_selected)]
 
     def _build_arrange_toolbar(self) -> None:
         """The Arrange toolbar: shown by default since 2026-09-14 (Marco kept
@@ -8631,12 +9034,15 @@ class ComposerWindow(QMainWindow):
         from PySide6.QtGui import QAction
         from PySide6.QtWidgets import QToolBar
         tb = QToolBar(tr("Arrange"), self)
+        tb.toggleViewAction().setStatusTip(tr("Show or hide this toolbar."))
         tb.setObjectName("arrange_toolbar")
         tb.setIconSize(QSize(toolbar_icon_px(), toolbar_icon_px()))
         from views.icons import tool_icon
-        for icon, label, slot in self._arrange_entries():
+        for icon, label, tip, slot in self._arrange_entries():
             act = QAction(tool_icon(icon), label, self)
-            act.setToolTip(label)
+            act.setProperty("icon_key", icon)
+            act.setToolTip(f"{label}\n{tip}")
+            act.setStatusTip(tip)
             act.triggered.connect(lambda _c, s=slot: s())
             tb.addAction(act)
         self.addToolBar(Qt.TopToolBarArea, tb)
@@ -8649,7 +9055,7 @@ class ComposerWindow(QMainWindow):
             lambda on: QSettings().setValue("composer/arrange_toolbar",
                                             "1" if on else "0"))
 
-    # ---- Copy / paste style (LayOut's Edit ▸ Copy Style / Paste Style) -------
+    # ---- Copy / paste style (Edit ▸ Copy Style / Paste Style) ----------------
     #: The look of each item kind — never its geometry or content.
     STYLE_FIELDS = {
         CotaItem: ("text_mm", "decimals", "units", "ends", "stroke_mm", "color",
@@ -8667,8 +9073,8 @@ class ComposerWindow(QMainWindow):
                      "title_style", "title_scale", "title_align",
                      "title_pos", "title_mm",
                      "pen_cut_mm", "pen_profile_mm", "pen_edge_mm",
-                     "profiles", "cut_fill", "cut_fill_color",
-                     "cut_hatch_mm"),
+                     "profiles", "hidden_lines", "cut_fill",
+                     "cut_fill_color", "cut_hatch_mm"),
         CotaRadialItem: ("text_mm", "decimals", "units", "ends",
                          "stroke_mm", "color", "text_color", "offset_mm",
                          "text_bg", "text_bg_opacity", "centre_mark"),
@@ -8773,10 +9179,21 @@ class ComposerWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("Style pasted on {n} item(s).", n=n), 3000)
 
-    # ---- Editing a frame's view in place (LayOut) ----------------------------
+    # ---- Editing a frame's view in place -------------------------------------
     @property
     def view_edit_item(self):
         return self._view_edit
+
+    def view_is_fixed(self, item) -> bool:
+        """A frame whose orientation its properties name — Top, Front,
+        Back, Left, Right, parallel. Editing it in place pans, zooms and
+        turns it (the turn is a property too), never orbits it off what it
+        says it is (#82, @pacaeiro: «the properties stop corresponding to
+        the reality of the View»)."""
+        frame = getattr(item, "model", None)
+        key = str(getattr(frame, "view_key", "") or "")
+        return (key.startswith("std:") and key != "std:iso"
+                and not getattr(frame, "perspective", False))
 
     def begin_view_edit(self, item) -> None:
         """Double-click on a frame: pan / orbit / zoom its view with the
@@ -8789,9 +9206,16 @@ class ComposerWindow(QMainWindow):
         self._view_edit = item
         item.force_select()
         item.update()
-        self.statusBar().showMessage(tr(
-            "Editing the view: drag = pan, Shift+drag = turn, middle button "
-            "or Ctrl+drag = orbit, wheel = zoom, Enter/Esc = done."), 8000)
+        if self.view_is_fixed(item):
+            self.statusBar().showMessage(tr(
+                "Editing the view: drag or middle button = pan, Shift+drag = "
+                "turn, wheel = zoom, Enter/Esc = done. A fixed view does not "
+                "orbit: change it in its properties."), 8000)
+        else:
+            self.statusBar().showMessage(tr(
+                "Editing the view: drag = pan, Shift+drag = turn, middle "
+                "button or Ctrl+drag = orbit, wheel = zoom, Enter/Esc = "
+                "done."), 8000)
 
     def end_view_edit(self) -> None:
         item = self._view_edit
@@ -8867,6 +9291,8 @@ class ComposerWindow(QMainWindow):
 
     def orbit_view(self, item, dyaw: float, dpitch: float) -> None:
         import math
+        if self.view_is_fixed(item):
+            return                  # a Top stays a Top (#82)
         frame = item.model
         _t, _r, _u, yaw, pitch = self._frame_camera_state(item)
         frame.cam_yaw = float(yaw + dyaw)
@@ -8933,7 +9359,7 @@ class ComposerWindow(QMainWindow):
         self._after_view_edit(item)
 
     def zoom_extents(self, item) -> None:
-        """LayOut's Zoom Extents: centre the whole model in the frame at the
+        """Zoom Extents: centre the whole model in the frame at the
         largest common scale that still fits it."""
         import numpy as np
         from core.hlr import _to_cam, camera_basis
@@ -9132,7 +9558,7 @@ class ComposerWindow(QMainWindow):
             return
         auto = model.auto_label()
         current = model.text if model.text else auto
-        text, ok = QInputDialog.getText(
+        text, ok = _prompts.get_text(
             self, tr("Dimension"),
             tr("Dimension text (<> = measured value):"), text=current)
         if not ok:
@@ -9393,7 +9819,7 @@ class ComposerWindow(QMainWindow):
         if isinstance(item, FrameItem):
             self.zoom_extents(item)
 
-    # ---- Auto-render (LayOut's Auto) -----------------------------------------
+    # ---- Auto-render (Auto) --------------------------------------------------
     def _on_model_version(self, version) -> None:
         """The viewport painted a new scene version: unless it is one of our
         own sheet edits, every frame is now stale."""
@@ -9434,13 +9860,24 @@ class ComposerWindow(QMainWindow):
         for f in list(self.comp.frames):
             if f.style == "vectorial":
                 continue
-            if id(f) in self._stale or id(f) not in self.render_cache:
+            if (id(f) in self._stale or id(f) not in self.render_cache
+                    or self._render_outgrown(f)):
                 self.render_frame(f)
                 done = True
         if done:
             self._rebuild_canvas()
         else:
             self.canvas.update()
+
+    def _render_outgrown(self, frame) -> bool:
+        """The frame was resized since its render: the picture no longer
+        has its size (#80, @pacaeiro: «each time I redimension the View I
+        have to Update the View»)."""
+        image = self.render_cache.get(id(frame))
+        if image is None:
+            return False
+        w, h = frame.render_px(RENDER_DPI)
+        return (image.width(), image.height()) != (w, h)
 
     def _on_history_change(self) -> None:
         self._mark_dirty()
@@ -9454,6 +9891,9 @@ class ComposerWindow(QMainWindow):
 
     def _rebuild_after_change(self) -> None:
         self._rebuild_canvas()
+        if self._auto_render and any(self._render_outgrown(f)
+                                     for f in self.comp.frames):
+            self._auto_timer.start()
         if getattr(self, "_pending_sel", None) is not None:
             for it in self.canvas.items():
                 if isinstance(it, _SheetItem) and it.model is self._pending_sel:
@@ -9581,7 +10021,7 @@ class ComposerWindow(QMainWindow):
 
     def _on_scale_committed(self) -> None:
         """Enter / focus-out on the scale box: remember a new 1:N in the
-        document (LayOut keeps only its presets; here a project's odd
+        document (not only the presets; here a project's odd
         scale, say 1:75, is one click away on the next frame)."""
         n = round(self._current_scale_n(), 3)
         if any(abs(n - k) < 1e-6 for k in self._scale_options()):
@@ -9615,12 +10055,11 @@ class ComposerWindow(QMainWindow):
         self._rebuild_canvas()
 
     def _on_pick_border_color(self) -> None:
-        from PySide6.QtWidgets import QColorDialog
-        col = QColorDialog.getColor(QColor(self.comp.border_color), self,
+        col = get_color(QColor(self.comp.border_color), self,
                                     tr("Border colour"))
         if col.isValid():
             self.comp.border_color = col.name()
-            self.border_color_btn.setStyleSheet(f"background: {col.name()};")
+            self.border_color_btn.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
             self._mark_dirty()
             self._rebuild_canvas()
 
@@ -9694,17 +10133,39 @@ class ComposerWindow(QMainWindow):
             item.model,
             {"locked": not getattr(item.model, "locked", False)}))
 
-    def _panel_edit(self, item: "_SheetItem", changes: dict) -> None:
+    def _panel_edit(self, item: "_SheetItem", changes: dict) -> list:
         """A live property edit from the panel: one coalesced undo step,
-        repainting just the touched item (no canvas rebuild mid-typing)."""
+        repainting just the touched items (no canvas rebuild mid-typing).
+        Returns the OTHER selected items the edit also went to."""
         model = item.model
-        if all(getattr(model, k) == v for k, v in changes.items()):
-            return
+        changed = {k: v for k, v in changes.items()
+                   if getattr(model, k) != v}
+        if not changed:
+            return []
+        # The panel shows ONE item, but what the user changed there goes to
+        # every selected item of its kind: several cotas selected, the unit
+        # set to m, all of them in m (Marco, 24-09: «solo una nomas cambia
+        # las demás no»). Only the fields that changed — each keeps its own
+        # text, place and the rest.
+        others = [it for it in self.canvas.selectedItems()
+                  if isinstance(it, _SheetItem) and it is not item
+                  and type(it.model) is type(model)
+                  and all(hasattr(it.model, k) for k in changed)]
         item.prepareGeometryChange()
-        self.history.execute(EditItemCommand(model, changes),
-                             notify=False, coalesce=True)
+        for it in others:
+            it.prepareGeometryChange()
+        if others:
+            cmd = CompoundCommand(
+                [EditItemCommand(model, changes)]
+                + [EditItemCommand(it.model, changed) for it in others])
+        else:
+            cmd = EditItemCommand(model, changes)
+        self.history.execute(cmd, notify=False, coalesce=True)
         self._mark_dirty()
         item.update()
+        for it in others:
+            it.update()
+        return others
 
     def _on_frame_props(self, *_a) -> None:
         item = self._selected_item()
@@ -9747,17 +10208,24 @@ class ComposerWindow(QMainWindow):
                       "km_step_m", "section_marks"}
         paint_only = paint_only | {"grid_m"}
         changed = {k for k, v in changes.items() if getattr(m, k) != v}
-        self._panel_edit(item, changes)
-        if changed - paint_only - annot_only:
-            self._forget_frame(m)
-        elif changed & annot_only:
-            try:
-                self.annot_cache[id(m)] = self.compute_annotations(m)
-            except Exception:  # noqa: BLE001 — a stub viewport in tests
-                self.annot_cache.pop(id(m), None)
+        others = self._panel_edit(item, changes)
+        for fm in [m] + [it.model for it in others]:
+            if changed - paint_only - annot_only:
+                self._forget_frame(fm)
+            elif changed & annot_only:
+                try:
+                    self.annot_cache[id(fm)] = self.compute_annotations(fm)
+                except Exception:  # noqa: BLE001 — a stub viewport in tests
+                    self.annot_cache.pop(id(fm), None)
         self._sync_vector_widgets(m)
         self._sync_title_widgets(m)
         self.refresh_items()                 # bound scale labels re-read {escala}
+        if (self._auto_render and self.isVisible()
+                and changed - paint_only - annot_only):
+            # The picture was dropped above: let the auto pass bring the
+            # raster frames back on its own instead of asking for a manual
+            # Update after every panel edit (#80).
+            self._auto_timer.start()
 
     def _on_frame_perspective(self, *_a) -> None:
         """The perspective switch and its lens. Turning it ON seeds the eye
@@ -9842,7 +10310,7 @@ class ComposerWindow(QMainWindow):
         style; the edge and profile pens serve every style (a raster frame
         renders its lines that thick)."""
         on = frame.style == "vectorial"
-        for w in (self.pen_cut_spin, self.profiles_check,
+        for w in (self.pen_cut_spin, self.profiles_check, self.hidden_check,
                   self.cut_fill_combo, self.cut_fill_btn,
                   self.cut_hatch_spin):
             w.setEnabled(on)
@@ -9902,9 +10370,12 @@ class ComposerWindow(QMainWindow):
             "pen_profile_mm": float(self.pen_profile_spin.value()),
             "pen_edge_mm": float(self.pen_edge_spin.value()),
             "profiles": self.profiles_check.isChecked(),
+            "hidden_lines": self.hidden_check.isChecked(),
             "cut_fill": self.cut_fill_combo.currentData() or "solid",
             "cut_hatch_mm": float(self.cut_hatch_spin.value())}
         recompute = (changes["profiles"] != getattr(m, "profiles", True)
+                     or changes["hidden_lines"] != getattr(m, "hidden_lines",
+                                                           False)
                      or ((changes["cut_fill"] == "none")
                          != (getattr(m, "cut_fill", "solid") == "none")))
         # A raster frame bakes the edge / profile pens into its pixels.
@@ -9999,7 +10470,7 @@ class ComposerWindow(QMainWindow):
         last = getattr(self, "_last_cajetin_fill", "#e9ecf0")
         item.prepareGeometryChange()
         self._panel_edit(item, {"fill_color": last if on else ""})
-        self.caj_fill_btn.setStyleSheet(f"background: {last};" if on else "")
+        self.caj_fill_btn.setStyleSheet(f"QAbstractButton {{ background: {last}; }}" if on else "")
         self._sync_cajetin_design_combo(item.model)
 
     def _on_cajetin_design(self, *_a) -> None:
@@ -10127,7 +10598,7 @@ class ComposerWindow(QMainWindow):
         if chosen is None:
             return
         if chosen is save:
-            name, ok = QInputDialog.getText(
+            name, ok = _prompts.get_text(
                 self, tr("Save template"), tr("Template name:"),
                 text=tr("My title block"))
             if ok and name.strip():
@@ -10189,13 +10660,12 @@ class ComposerWindow(QMainWindow):
             f"background: {last};" if on else "")
 
     def _on_pick_text_bg(self) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if not isinstance(item, TextItem):
             return
         current = item.model.bg_color or getattr(self, "_last_text_bg",
                                                  "#ffffff")
-        col = QColorDialog.getColor(QColor(current), self,
+        col = get_color(QColor(current), self,
                                     tr("Background colour"))
         if col.isValid():
             self._last_text_bg = col.name()
@@ -10204,18 +10674,17 @@ class ComposerWindow(QMainWindow):
             self._updating = True
             self.text_bg_check.setChecked(True)
             self._updating = False
-            self.text_bg_btn.setStyleSheet(f"background: {col.name()};")
+            self.text_bg_btn.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
 
     def _on_pick_text_color(self) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if not isinstance(item, TextItem):
             return
-        col = QColorDialog.getColor(QColor(item.model.color), self,
+        col = get_color(QColor(item.model.color), self,
                                     tr("Colour"))
         if col.isValid():
             self._panel_edit(item, {"color": col.name()})
-            self.text_color_btn.setStyleSheet(f"background: {col.name()};")
+            self.text_color_btn.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
 
     def _on_norte_props(self, *_a) -> None:
         item = self._selected_item()
@@ -10341,7 +10810,7 @@ class ComposerWindow(QMainWindow):
         if not item.model.anchored:
             changes["z_m"] = float(self.nv_z.value())
         self._panel_edit(item, changes)
-        # the next mark inherits the look (LayOut remembers the last style)
+        # the next mark inherits the look (the last style is remembered)
         self._last_nivel_style = {k: changes[k] for k in
                                   ("text", "symbol", "datum_m", "decimals",
                                    "size_mm", "line_mm", "mirror",
@@ -10404,18 +10873,17 @@ class ComposerWindow(QMainWindow):
         last = getattr(self, "_last_text_bg", "#ffffff")
         item.prepareGeometryChange()
         self._panel_edit(item, {attr: last if on else ""})
-        button.setStyleSheet(f"background: {last};" if on else "")
+        button.setStyleSheet(f"QAbstractButton {{ background: {last}; }}" if on else "")
         if isinstance(item.model, CotaItem):
             self._remember_cota_style(item.model)
 
     def _pick_item_bg(self, attr: str, check, button) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if item is None or not hasattr(item.model, attr):
             return
         current = getattr(item.model, attr, "") or getattr(
             self, "_last_text_bg", "#ffffff")
-        col = QColorDialog.getColor(QColor(current), self,
+        col = get_color(QColor(current), self,
                                     tr("Background colour"))
         if col.isValid():
             self._last_text_bg = col.name()
@@ -10424,29 +10892,27 @@ class ComposerWindow(QMainWindow):
             self._updating = True
             check.setChecked(True)
             self._updating = False
-            button.setStyleSheet(f"background: {col.name()};")
+            button.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
             if isinstance(item.model, CotaItem):
                 self._remember_cota_style(item.model)
 
     def _pick_item_color(self, attr: str, button) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if item is None:
             return
         current = getattr(item.model, attr, "") or getattr(
             item.model, "color", "#1e242c")
-        col = QColorDialog.getColor(QColor(current), self, tr("Colour"))
+        col = get_color(QColor(current), self, tr("Colour"))
         if col.isValid():
             item.prepareGeometryChange()
             self._panel_edit(item, {attr: col.name()})
-            button.setStyleSheet(f"background: {col.name()};")
+            button.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
 
     def _on_pick_cota_text_color(self) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if not isinstance(item, CotaCanvasItem):
             return
-        col = QColorDialog.getColor(
+        col = get_color(
             QColor(item.model.text_color or item.model.color), self,
             tr("Text colour"))
         if col.isValid():
@@ -10458,8 +10924,8 @@ class ComposerWindow(QMainWindow):
                 f"background: {col.name()};")
             self._remember_cota_style(item.model)
 
-    #: Style fields a new cota inherits from the last one edited (LayOut
-    #: draws new dimensions with the current style settings).
+    #: Style fields a new cota inherits from the last one edited (the usual
+    #: convention: new dimensions take the current style settings).
     _COTA_STYLE_FIELDS = ("text_mm", "decimals", "ends", "stroke_mm",
                           "color", "offset_mm",
                           "text_color", "text_bg",
@@ -10519,15 +10985,14 @@ class ComposerWindow(QMainWindow):
             if k in self._COTA_STYLE_FIELDS and hasattr(probe, k)}
 
     def _on_pick_cota_color(self) -> None:
-        from PySide6.QtWidgets import QColorDialog
         item = self._selected_item()
         if not isinstance(item, CotaCanvasItem):
             return
-        col = QColorDialog.getColor(QColor(item.model.color), self,
+        col = get_color(QColor(item.model.color), self,
                                     tr("Colour"))
         if col.isValid():
             self._panel_edit(item, {"color": col.name()})
-            self.cota_color_btn.setStyleSheet(f"background: {col.name()};")
+            self.cota_color_btn.setStyleSheet(f"QAbstractButton {{ background: {col.name()}; }}")
 
     def _item_label(self, model) -> str:
         if isinstance(model, EtiquetaItem):
@@ -10567,50 +11032,183 @@ class ComposerWindow(QMainWindow):
             return tr("Title block")
         return type(model).__name__
 
+    #: Folders of the grouped Items list (issue #93), in this order.
+    _ITEM_CATEGORIES = (
+        ("views", "Views"), ("dimensions", "Dimensions"),
+        ("annotations", "Annotations"), ("graphics", "Graphics"),
+        ("sheet", "Sheet elements"))
+
+    @staticmethod
+    def _item_category(model) -> str:
+        if isinstance(model, MarcoVista):
+            return "views"
+        if isinstance(model, (CotaItem, CotaAngularItem, CotaRadialItem,
+                              NivelItem)):
+            return "dimensions"
+        if isinstance(model, (TextoItem, EtiquetaItem, LlamadaItem)):
+            return "annotations"
+        if isinstance(model, (FormaItem, ImagenItem)):
+            return "graphics"
+        return "sheet"            # title block, scale bar, north, legend…
+
+    def _list_text(self, model) -> str:
+        """What the Items list shows: the user's name, or the automatic
+        one (the eye and the padlock have their own columns)."""
+        name = (getattr(model, "list_name", "") or "").strip()
+        return name or self._item_label(model)
+
     def _refresh_items_list(self) -> None:
         from PySide6.QtCore import Qt as _Qt
-        from PySide6.QtWidgets import QListWidgetItem
-        self.items_list.blockSignals(True)
-        self.items_list.clear()
+        from PySide6.QtWidgets import QTreeWidgetItem
+        tree = self.items_list
+        tree.blockSignals(True)
+        tree.clear()
+        grouped = self.items_group_check.isChecked()
+        tree.setRootIsDecorated(grouped)
+        folders: dict = {}
+        if grouped:
+            for key, title in self._ITEM_CATEGORIES:
+                f = QTreeWidgetItem(["", "", tr(title)])
+                f.setFlags(_Qt.ItemIsEnabled)          # a folder: no select
+                f.setFirstColumnSpanned(False)
+                f.setData(0, _Qt.UserRole, None)
+                folders[key] = f
         # top of the stack first — the reading order of a layers panel
         for model in sorted(self.comp.all_items(),
                             key=lambda m: getattr(m, "z", 0.0),
                             reverse=True):
-            label = self._item_label(model)
-            if getattr(model, "locked", False):
-                label = "🔒 " + label
-            row = QListWidgetItem(label)
-            row.setData(_Qt.UserRole, id(model))
-            self.items_list.addItem(row)
-        self.items_list.blockSignals(False)
+            row = QTreeWidgetItem(["", "", self._list_text(model)])
+            row.setData(0, _Qt.UserRole, id(model))
+            row.setFlags(_Qt.ItemIsEnabled | _Qt.ItemIsSelectable
+                         | _Qt.ItemIsEditable | _Qt.ItemIsUserCheckable)
+            row.setCheckState(0, _Qt.Unchecked
+                              if getattr(model, "hidden", False)
+                              else _Qt.Checked)
+            row.setCheckState(1, _Qt.Checked
+                              if getattr(model, "locked", False)
+                              else _Qt.Unchecked)
+            row.setToolTip(0, tr("Visible"))
+            row.setToolTip(1, tr("Locked"))
+            if grouped:
+                folders[self._item_category(model)].addChild(row)
+            else:
+                tree.addTopLevelItem(row)
+        if grouped:
+            for key, _t in self._ITEM_CATEGORIES:
+                f = folders[key]
+                if f.childCount():
+                    f.setText(2, f"{f.text(2)} ({f.childCount()})")
+                    tree.addTopLevelItem(f)
+                    f.setExpanded(True)
+        tree.blockSignals(False)
+
+    def _item_rows(self):
+        """Every item row of the list, folders or not."""
+        from PySide6.QtWidgets import QTreeWidgetItemIterator
+        it = QTreeWidgetItemIterator(self.items_list)
+        while it.value() is not None:
+            row = it.value()
+            if row.data(0, Qt.UserRole) is not None:
+                yield row
+            it += 1
 
     def _sync_items_list(self, item) -> None:
-        from PySide6.QtCore import Qt as _Qt
         self.items_list.blockSignals(True)
         self.items_list.clearSelection()
         if item is not None:
             target = id(item.model)
-            for i in range(self.items_list.count()):
-                if self.items_list.item(i).data(_Qt.UserRole) == target:
-                    self.items_list.setCurrentRow(i)
+            for row in self._item_rows():
+                if row.data(0, Qt.UserRole) == target:
+                    self.items_list.setCurrentItem(row)
+                    self.items_list.scrollToItem(row)
                     break
         self.items_list.blockSignals(False)
 
     def _on_list_select(self) -> None:
-        from PySide6.QtCore import Qt as _Qt
         if self._updating:
             return
-        rows = self.items_list.selectedItems()
+        rows = [r for r in self.items_list.selectedItems()
+                if r.data(0, Qt.UserRole) is not None]
         if not rows:
             return
-        target = rows[0].data(_Qt.UserRole)
+        target = rows[0].data(0, Qt.UserRole)
         for it in self.canvas.items():
             if isinstance(it, _SheetItem) and id(it.model) == target:
                 self._updating = True
                 self.canvas.clearSelection()
                 self._updating = False
-                it.force_select()
+                self._picking_from_list = True
+                try:
+                    it.force_select()
+                finally:
+                    self._picking_from_list = False
                 break
+
+    def _on_item_renamed(self, row, column=2) -> None:
+        """A change in the Items list: the eye (column 0) shows or hides
+        the item, the padlock (1) locks it, the name (2, double-click or
+        F2) renames it — each undoable; an empty name goes back to the
+        automatic one."""
+        target = row.data(0, Qt.UserRole)
+        if target is None:
+            return
+        if column in (0, 1):
+            field = "hidden" if column == 0 else "locked"
+            on = row.checkState(column) == Qt.Checked
+            value = (not on) if column == 0 else on
+            model = next((m for m in self.comp.all_items()
+                          if id(m) == target), None)
+            if model is not None and getattr(model, field, False) != value:
+                self.history.execute(EditItemCommand(model, {field: value}),
+                                     notify=False)
+                self._mark_dirty()
+                QTimer.singleShot(0, self._rebuild_canvas)
+            return
+        for it in self.canvas.items():
+            if isinstance(it, _SheetItem) and id(it.model) == target:
+                text = row.text(2).strip()
+                auto = self._item_label(it.model)
+                name = "" if text in ("", auto) else text
+                if name != (getattr(it.model, "list_name", "") or ""):
+                    # This item only — the panel's edits go to every
+                    # selected item of the kind, a name must not.
+                    self.history.execute(
+                        EditItemCommand(it.model, {"list_name": name}))
+                    self._mark_dirty()
+                break
+        # Show the resolved text (the automatic name, the lock) again.
+        QTimer.singleShot(0, self._refresh_items_list)
+
+    def _open_item_properties(self) -> None:
+        """The Properties tab for the item picked in the list."""
+        self._tabs.setCurrentIndex(2)
+
+    def _items_context_menu(self, pos) -> None:
+        row = self.items_list.itemAt(pos)
+        if row is None or row.data(0, Qt.UserRole) is None:
+            return
+        self.items_list.setCurrentItem(row)
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self.items_list)
+        menu.addAction(tr("Properties"), self._open_item_properties)
+        menu.addAction(tr("Rename"),
+                       lambda r=row: self.items_list.editItem(r, 2))
+        menu.addSeparator()
+        shown = row.checkState(0) == Qt.Checked
+        locked = row.checkState(1) == Qt.Checked
+        menu.addAction(tr("Hide") if shown else tr("Show"),
+                       lambda r=row, s=shown: r.setCheckState(
+                           0, Qt.Unchecked if s else Qt.Checked))
+        menu.addAction(tr("Unlock") if locked else tr("Lock"),
+                       lambda r=row, l=locked: r.setCheckState(
+                           1, Qt.Unchecked if l else Qt.Checked))
+        menu.exec(self.items_list.viewport().mapToGlobal(pos))
+
+    def _on_items_grouping(self, on: bool) -> None:
+        from PySide6.QtCore import QSettings
+        QSettings().setValue("composer/items_grouped", "1" if on else "0")
+        self._refresh_items_list()
+        self._sync_items_list(self._selected_item())
 
     def _on_scalebar_props(self, *_a) -> None:
         item = self._selected_item()
@@ -10863,6 +11461,11 @@ class ComposerWindow(QMainWindow):
         # with shadows; the live viewport gets its own settings back.
         shadows = getattr(scene, "shadows", None)
         keep_shadows = shadows.to_dict() if shadows is not None else None
+        # ``Scene.bounds()`` caches by version, and swapping layer
+        # visibility here does not bump it: a bounds read during the frame
+        # would outlive it, and Zoom Extents would frame the sheet's view
+        # instead of the live model. Forget it on the way in and out.
+        scene._bounds_cache = None
         try:
             apply_frame_camera(cam, frame, saved_view, scene)
             apply_frame_shadows(frame, scene)
@@ -10872,6 +11475,7 @@ class ComposerWindow(QMainWindow):
              cam.perspective, cam.aspect, cam.up) = keep[:8]
             for ly, visible in keep[8]:
                 ly.visible = visible
+            scene._bounds_cache = None
             if hasattr(scene, "set_active_section"):
                 scene.set_active_section(keep_section[0])
                 scene.show_section_planes = keep_section[1]
@@ -11006,18 +11610,33 @@ class ComposerWindow(QMainWindow):
                 best = (d, (cx, cy, r))
         return best[1] if best else None
 
+    def _frame_page_stamp(self, frame: MarcoVista) -> tuple:
+        """The page geometry ``frame_snap_points`` projects through, so its
+        cache can tell **by itself** whether the pair it holds still belongs
+        to where the frame is.
+
+        A move must not depend on whoever moved it remembering to drop the
+        cache: a drag lands in ``push_geometry_edit`` and an undo in
+        ``_on_history_change`` -> ``_rebuild_after_change``, and neither of
+        them forgets anything."""
+        return (frame.x_mm, frame.y_mm, frame.w_mm, frame.h_mm)
+
     def frame_snap_points(self, frame: MarcoVista):
         """Snappable geometry points of *frame*'s view — an ``(M, 2)`` array
         in PAGE millimetres paired with the same points in WORLD metres
         ``(M, 3)`` (the anchor data): every edge endpoint plus each edge's
-        midpoint. Cached by frame id. Small scenes use the same exact
-        hidden-line pass the vector style uses (a point only snaps where
-        the drawing shows an edge); big scenes project every edge without
-        the visibility kernel (see ``_EXACT_SNAP_EDGE_BUDGET``)."""
+        midpoint. Cached by frame id *and* the page geometry it was computed
+        at: a frame moved behind the cache's back (a drag, an undo) must
+                never be read with the endpoints of where it used to be. Small scenes
+        use the same exact hidden-line pass the vector style uses (a point
+        only snaps where the drawing shows an edge); big scenes project every
+        edge without the visibility kernel (see ``_EXACT_SNAP_EDGE_BUDGET``)."""
         import numpy as np
+        stamp = self._frame_page_stamp(frame)
         cached = self.snap_cache.get(id(frame))
-        if cached is not None:
-            return cached
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+
         from core.composition import frame_page_projector
         from core.hlr import _to_cam, camera_basis, hlr_view
 
@@ -11079,7 +11698,8 @@ class ComposerWindow(QMainWindow):
                  and not self.frame_is_perspective(frame))
         pair = self._with_frame_camera(frame, run_exact if exact
                                        else run_fast)
-        self.snap_cache[id(frame)] = pair
+        self.snap_cache[id(frame)] = (stamp, pair)
+
         return pair
 
     def _frame_world_to_page(self, frame: MarcoVista, world_pts):
@@ -11221,6 +11841,8 @@ class ComposerWindow(QMainWindow):
         best = None
         best_d2 = thr_mm * thr_mm
         for frame in self.comp.frames:
+            if getattr(frame, "hidden", False):
+                continue                    # a hidden view offers no snaps
             pts, wpts = self.frame_snap_points(frame)
             if not len(pts):
                 continue
@@ -11246,7 +11868,8 @@ class ComposerWindow(QMainWindow):
                 vp.scene, vp.camera, geometry=self._scene_geometry(),
                 profiles=bool(getattr(frame, "profiles", True)),
                 fills=(getattr(frame, "cut_fill", "solid") or "solid")
-                != "none")
+                != "none",
+                hidden=bool(getattr(frame, "hidden_lines", False)))
             segs = drawing.segs
             model_h = model_height_for_frame(frame.h_mm, frame.scale_n)
             k = frame.h_mm / model_h                 # paper mm per metre
@@ -11290,7 +11913,9 @@ class ComposerWindow(QMainWindow):
                                geometry=self._scene_geometry(),
                                profiles=bool(getattr(frame, "profiles",
                                                      True)),
-                               fills=False)
+                               fills=False,
+                               hidden=bool(getattr(frame, "hidden_lines",
+                                                   False)))
 
         return self._with_frame_camera(frame, run)
 
@@ -11388,15 +12013,20 @@ class ComposerWindow(QMainWindow):
         if not path:
             return
         drawing = self.model_view_drawing(item.model)
-        from core.hlr import KIND_CUT, KIND_PROFILE
+        from core.hlr import KIND_CUT, KIND_EDGE, KIND_HIDDEN, KIND_PROFILE
         from formats.dxf_out import save_dxf_layers
         layer = frame_title_text(item.model).split(" — ")[0]
         k = drawing.kinds
-        # One layer per line class — IngeCAD's pen table does the weights.
-        n = save_dxf_layers(path, [
-            (layer, drawing.segs[(k != KIND_CUT) & (k != KIND_PROFILE)]),
+        # One layer per line class — IngeCAD's pen table does the weights;
+        # the hidden lines go on their own layer, dashed (#81).
+        groups = [
+            (layer, drawing.segs[k == KIND_EDGE]),
             (f"{layer}-PERFIL", drawing.segs[k == KIND_PROFILE]),
-            (f"{layer}-CORTE", drawing.segs[k == KIND_CUT])])
+            (f"{layer}-CORTE", drawing.segs[k == KIND_CUT])]
+        if getattr(item.model, "hidden_lines", False):
+            groups.append((f"{layer}-OCULTAS", drawing.segs[k == KIND_HIDDEN],
+                           "DASHED"))
+        n = save_dxf_layers(path, groups)
         self.statusBar().showMessage(
             tr("Exported {n} lines to {name}", n=n, name=path), 5000)
 
@@ -11632,6 +12262,8 @@ class ComposerWindow(QMainWindow):
 
         for m in sorted(comp.all_items(),
                         key=lambda it: getattr(it, "z", 0.0)):
+            if getattr(m, "hidden", False):
+                continue            # hidden from the Items list: not printed
             painter.save()
             painter.translate(m.x_mm, m.y_mm)
             paint(m)
@@ -11669,11 +12301,28 @@ class ComposerWindow(QMainWindow):
         self.addAction(act)
         self._act_sidebar = act
         clean = QAction(tr("Clean screen"), self)
+        clean.setStatusTip(tr(
+            "Fold away every toolbar, panel and bar so only the sheet "
+            "shows; once more brings them all back."))
         clean.setShortcut(QKeySequence("Ctrl+0"))
         clean.setCheckable(True)
         clean.toggled.connect(self._toggle_clean_screen)
         self.addAction(clean)
         self._act_clean_screen = clean
+        # F3, the command search of the main window, over this window's
+        # own commands (views/command_search.py).
+        from views.command_search import OBJECT_NAME, open_search
+        search = QAction(tr("Search commands…"), self)
+        search.setObjectName(OBJECT_NAME)
+        search.setShortcut(QKeySequence("F3"))
+        search.triggered.connect(lambda: open_search(self))
+        self.addAction(search)
+        from views.command_search import warm_up
+        warm_up(self)
+
+    def command_search_area(self):
+        """Where F3 opens: the sheet with its rulers, not the side panel."""
+        return self._canvas_area
 
     @property
     def _panel(self):
@@ -11694,7 +12343,9 @@ class ComposerWindow(QMainWindow):
             panel.hide()
         btn = getattr(self, "_sidebar_handle", None)
         if btn is not None:
-            btn.setIcon(tool_icon("side_collapse" if on else "side_expand"))
+            key = "side_collapse" if on else "side_expand"
+            btn.setIcon(tool_icon(key))
+            btn.setProperty("icon_key", key)
             QTimer.singleShot(0, self._place_sidebar_handle)
 
     def _build_sidebar_handle(self) -> None:
@@ -11710,6 +12361,7 @@ class ComposerWindow(QMainWindow):
         btn.setFixedSize(14, 56)
         btn.setIconSize(QSize(12, 12))
         btn.setIcon(tool_icon("side_collapse"))
+        btn.setProperty("icon_key", "side_collapse")
         btn.setToolTip(self._act_sidebar.toolTip())
         btn.setCursor(Qt.PointingHandCursor)
         btn.setAutoRaise(True)
@@ -11810,7 +12462,29 @@ class ComposerWindow(QMainWindow):
                 self._place_sidebar_handle()
         return super().eventFilter(obj, event)
 
+    def _ensure_toolbars(self) -> None:
+        """Never open with no toolbar at all (#114, macOS: the composer came
+        up with none, not even the tools). Hiding one is a choice — made by
+        right-clicking a toolbar, and remembered; hiding EVERY one leaves
+        nothing to right-click to bring them back, so it is never a choice
+        but a broken saved arrangement. Then the factory layout comes back:
+        tools on the left, sheet and draw on top."""
+        if self._act_clean_screen.isChecked() or not self.isVisible():
+            return
+        main = (self._tools_tb, self._draw_tb, self._sheet_tb)
+        if any(tb.isVisible() for tb in main):
+            return
+        self.addToolBar(Qt.TopToolBarArea, self._sheet_tb)
+        self.addToolBar(Qt.TopToolBarArea, self._draw_tb)
+        self.addToolBar(Qt.LeftToolBarArea, self._tools_tb)
+        for tb in main:
+            tb.show()
+        self.statusBar().showMessage(
+            tr("The toolbars were hidden — they are back in their places."),
+            6000)
+
     def showEvent(self, event) -> None:
+        QTimer.singleShot(0, self._ensure_toolbars)
         QTimer.singleShot(0, self._auto_render_stale)
         QTimer.singleShot(0, self._reload_scale_options)
         # The document may have been swapped under us (New / Open) while

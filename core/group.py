@@ -12,6 +12,7 @@ Selected as a unit and moved/exploded via the commands in :mod:`core.history`.
 """
 from __future__ import annotations
 
+import copy
 import itertools
 
 from core.mesh import Mesh
@@ -44,7 +45,8 @@ def reserve_group_names(names) -> None:
 class Group:
     __slots__ = ("mesh", "name", "layer", "ifc", "billboard", "xform",
                  "children", "owner", "context", "text3d", "hidden", "uid",
-                 "material")
+                 "material", "axes", "component", "exploded",
+                 "explode_offset", "ext")
 
     def __init__(self, mesh: Mesh | None = None, name: str | None = None) -> None:
         self.mesh = mesh if mesh is not None else Mesh()
@@ -53,14 +55,19 @@ class Group:
         self.layer = None
         # BIM tag ({"class": "IfcWall", "name": ...}) or None — see core/bim.py.
         self.ifc = None
-        # Face-me billboard (SketchUp): the group's textured quad rotates
+        # Face-me billboard: the group's textured quad rotates
         # around its vertical anchor axis to face the camera every frame.
         self.billboard = False
         # 3D text (core/text3d.py): the parameters this container was
         # generated from — text, font, height… — so it can be re-edited and
         # laid out again in place. ``None`` on every other group.
         self.text3d = None
-        # SketchUp's Hide: the object stays in the document but draws,
+        # Extensions' own parameters for this container, by extension key
+        # ({"windowizer": {...}}): kept with copies and saved in the .igz,
+        # and apart from ``ifc``, which the BIM panel replaces when it
+        # retags. ``None`` when no extension wrote here.
+        self.ext = None
+        # Hide: the object stays in the document but draws,
         # picks, snaps and exports as if it were not there — until Unhide,
         # or the scene that remembers it visible (Rafael, 2026-09-16: «una
         # escena en donde esto esté oculto»). A hidden TAG hides by layer;
@@ -70,31 +77,38 @@ class Group:
         # it remembers which objects it hides. Fresh per object; a copy gets
         # its own (see ``copy_group``).
         self.uid = new_uid()
-        #: The container's own paint (SketchUp: a group or component
+        #: The container's own paint (the usual convention: a group or component
         #: instance takes a material, and every face inside that wears the
         #: default material shows it; a face painted itself keeps its own —
         #: issue #47, @pacaeiro). Same keys as a face's attrs: ``color`` or
         #: ``texture``, ``opacity``, ``mat``. ``None`` = unpainted.
         self.material: dict | None = None
-        # Component instance (SketchUp): when set, ``mesh`` is a PROTOTYPE in
+        #: Exploded view (core/explode.py). On a container: ``{"factor",
+        #: "mode"}`` while its parts are pulled apart, ``None`` assembled.
+        #: On a part: the ``(x, y, z)`` translation, in the container's
+        #: frame, the explosion added to its matrix — what Reassemble
+        #: takes back off, so a part moved by hand meanwhile keeps that.
+        self.exploded: dict | None = None
+        self.explode_offset: tuple | None = None
+        # Component instance: when set, ``mesh`` is a PROTOTYPE in
         # local coordinates SHARED with sibling instances, and ``xform`` maps
         # local -> world. ``None`` = classic group (mesh in world coords).
         # Instances render/pick through transformed chunk arrays; transform
         # tools compose into ``xform`` (O(1)); geometry edits first
-        # ``materialize`` the instance (SketchUp's "make unique").
+        # ``materialize`` the instance ("make unique").
         self.xform = None
         # Nested placements the group OWNS: each a Group with an ``xform``
         # over a SHARED prototype mesh, in this group's coordinates. They
         # render, pick and export as part of their parent — one object to
         # the user, however deep the tree — which is what lets an imported
-        # component keep the sharing SketchUp gave it.
+        # component keep the sharing its .skp file gave it.
         #
         # Without them a component's internal repetition was flattened on
         # import: the hedge in piscina.igz is 4480 + 5120 faces placed 48
         # times, and it arrived as 230400 real ones. Twenty-four times the
         # geometry, for the element that is 89% of that model — which is
         # why the .skp we wrote was 80 MB against the original's 14, and
-        # why SketchUp Web laboured over our copy of a model it draws
+        # why a web .skp viewer laboured over our copy of a model it draws
         # fluently itself.
         self.children: list = []
         # Set only on the throwaway placement proxies the viewport builds for
@@ -106,6 +120,27 @@ class Group:
         # draw passes know they are the subject and not the surroundings.
         # ``None`` at the root and on anything outside the open context.
         self.context = None
+        #: The LOCAL AXES of a classic group (issue #44, @pacaeiro): where
+        #: its own red/green/blue sit in the world, as a matrix whose
+        #: columns are the axes and whose translation is the origin. A
+        #: classic group keeps its mesh in world coordinates, so without
+        #: this every Move/Rotate/Scale baked the turn into the vertices and
+        #: the group forgot which way it faced. ``None`` = the world axes.
+        #: A component instance does not use it: its ``xform`` IS its axes.
+        self.axes = None
+        #: Whether this instance is a COMPONENT — a definition its copies
+        #: share, as Make Component or a .skp import makes it — or a
+        #: GROUP that only carries a matrix: a group of groups (``adopt``
+        #: makes every container an instance) or a copied group waiting to
+        #: be edited. Only meaningful with an ``xform``; read it through
+        #: :meth:`is_component` (issue #90, @fafecm: «the parent group
+        #: always becomes a component»).
+        self.component = True
+
+    def is_component(self) -> bool:
+        """A component instance, as the user knows it — not merely a group
+        that carries a matrix."""
+        return self.xform is not None and bool(self.component)
 
     def adopt(self, children) -> None:
         """Take ``children`` as nested placements, guaranteeing the invariant
@@ -125,7 +160,7 @@ class Group:
         return self.xform is not None
 
     def materialize(self) -> None:
-        """Bake this instance into its OWN world-space mesh (SketchUp 'make
+        """Bake this instance into its OWN world-space mesh ('make
         unique'): sibling instances keep the shared prototype untouched.
         Editing into an instance no longer does this — the session edits a
         world copy and shares it back on leaving (Scene.begin_group_edit).
@@ -135,14 +170,86 @@ class Group:
         child geometry a second time."""
         if self.xform is None and not self.children:
             return
+        frame = group_frame(self)
         self.mesh = world_mesh(self)
         self.xform = None
+        self.axes = frame                   # baked, but it still faces its way
         self.children = []
+
+    def make_unique(self) -> None:
+        """Make Unique: this instance stops sharing with its
+        siblings. Without nested placements it bakes into a classic group
+        (``materialize``); WITH them it keeps its placement and its tree —
+        a private copy of its own mesh and of every subgroup below it — so
+        the subgroups stay subgroups instead of being fused into one mesh
+        (issue #90, @fafecm: «it explodes all the subgroups within it»)."""
+        if not self.children:
+            self.materialize()
+            return
+        from PySide6.QtGui import QMatrix4x4
+        self.mesh = transformed_mesh(self.mesh, QMatrix4x4())
+        self.children = [_independent_copy(c) for c in self.children]
+        # Nothing shared any more: what is left is a group of groups.
+        self.component = False
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         kind = " instance" if self.xform is not None else ""
         return (f"Group({self.name!r}{kind}: {len(self.mesh.faces)} faces, "
                 f"{len(self.mesh.edges)} edges)")
+
+
+# ---- Local axes (issue #44) ---------------------------------------------------
+
+def carry_axes(group, m) -> None:
+    """A classic group's geometry was just transformed by ``m`` in world
+    space: its axes go with it (the analogue of composing ``xform`` for an
+    instance). Instances are left alone — their ``xform`` already moved."""
+    if group is None or getattr(group, "xform", None) is not None:
+        return
+    from PySide6.QtGui import QMatrix4x4
+    base = group.axes if group.axes is not None else QMatrix4x4()
+    group.axes = m * base
+
+
+def group_frame(group):
+    """The world matrix of ``group``'s own axes, or ``None`` for the world
+    axes. ``axes`` lives in the space of the group's mesh, so the frame is
+    ``xform · axes``: an instance's placement, a classic group's stored
+    axes, or both when a classic group became an instance (a container's
+    child once the container is opened)."""
+    if group is None:
+        return None
+    xform = getattr(group, "xform", None)
+    axes = getattr(group, "axes", None)
+    if xform is None:
+        return axes
+    return xform if axes is None else xform * axes
+
+
+def frame_axes(m):
+    """``(origin, x, y, z)`` of a frame matrix, the three axes made unit and
+    square to each other (a scaled or skewed placement still draws
+    orthogonal axes; red first, green squared to it, blue from both — and
+    a mirrored placement keeps its handedness). ``m=None`` is the world."""
+    from PySide6.QtGui import QVector3D
+    if m is None:
+        return (QVector3D(0, 0, 0), QVector3D(1, 0, 0), QVector3D(0, 1, 0),
+                QVector3D(0, 0, 1))
+    o = m.map(QVector3D(0, 0, 0))
+    x = m.mapVector(QVector3D(1, 0, 0))
+    y = m.mapVector(QVector3D(0, 1, 0))
+    z = m.mapVector(QVector3D(0, 0, 1))
+    if x.length() < 1e-12:
+        x = QVector3D(1, 0, 0)
+    x = x.normalized()
+    y = y - x * QVector3D.dotProduct(y, x)
+    if y.length() < 1e-12:
+        y = QVector3D.crossProduct(z, x)
+    y = y.normalized()
+    zz = QVector3D.crossProduct(x, y).normalized()
+    if QVector3D.dotProduct(zz, z) < 0:
+        zz = -zz                           # a mirrored placement
+    return o, x, y, zz
 
 
 def make_billboard_group(image_path: str, height: float, name: str,
@@ -460,30 +567,70 @@ def translated_attrs(attrs, delta) -> dict:
     return out
 
 
-def copy_group(group, delta=None):
+def copy_group(group, delta=None, _in_definition=False):
     """A pastable duplicate of ``group``, optionally translated by ``delta``.
 
     A component instance stays an instance: the duplicate SHARES the prototype
-    mesh and only gets its own transform (SketchUp: copying an instance adds a
-    sibling, O(1)). A classic group gets a deep mesh copy."""
+    mesh and only gets its own transform (copying an instance adds a
+    sibling, O(1)). A classic group gets a deep mesh copy.
+
+    Everything inside a COMPONENT belongs to its definition, so the groups
+    nested in it are shared too, at every depth (issue #97: editing a group
+    inside one copy left the other copies as they were). A classic child
+    becomes an identity placement first — same place in the world — so the
+    original and the copy hold the same mesh and an edit inside either
+    shares back to both."""
     from PySide6.QtGui import QMatrix4x4, QVector3D
+    share = _in_definition or (group.xform is not None
+                               and bool(getattr(group, "component", True)))
+    if share:
+        for child in group.children or ():
+            if child.xform is None:
+                child.xform = QMatrix4x4()
+                child.component = False     # it was a group, it stays one
     t = QMatrix4x4()
     if delta is not None:
         t.translate(QVector3D(delta))
     if group.xform is not None:
         g = Group(group.mesh, name=group.name)
         g.xform = t * group.xform
+        # The local axes live in the mesh's space, which the copy shares:
+        # they come along as they are. Dropping them turned a pasted
+        # rotated group's axes back to the world's (issue #78, @pacaeiro:
+        # Copy makes a classic group an instance, and Paste copies that).
+        if getattr(group, "axes", None) is not None:
+            g.axes = QMatrix4x4(group.axes)
     else:
         g = Group(transformed_mesh(group.mesh, t), name=group.name)
+        if getattr(group, "axes", None) is not None:
+            g.axes = t * group.axes
     g.layer = group.layer
     g.ifc = dict(group.ifc) if group.ifc else None
     g.billboard = group.billboard
     g.text3d = dict(group.text3d) if group.text3d else None
+    g.ext = copy.deepcopy(group.ext) if getattr(group, "ext", None) else None
     g.hidden = group.hidden
     g.material = dict(group.material) if getattr(group, "material", None) else None
+    g.component = getattr(group, "component", True)
+    g.exploded = dict(group.exploded) if group.exploded else None
+    g.explode_offset = group.explode_offset
     # Nested placements ride along untranslated: ``delta`` already moved the
     # parent, and a child's transform is relative to it.
-    g.children = [copy_group(c) for c in (group.children or ())]
+    g.children = [copy_group(c, _in_definition=share)
+                  for c in (group.children or ())]
+    return g
+
+
+def _independent_copy(group):
+    """``copy_group`` without the sharing: every mesh in the subtree is a
+    copy of its own, so editing it never reaches the original's copies.
+    The copy keeps the uid — it REPLACES the original in its parent."""
+    from PySide6.QtGui import QMatrix4x4
+    g = copy_group(group)
+    if group.xform is not None:
+        g.mesh = transformed_mesh(group.mesh, QMatrix4x4())
+    g.uid = group.uid
+    g.children = [_independent_copy(c) for c in (group.children or ())]
     return g
 
 
@@ -563,8 +710,8 @@ def frame_from_points(positions) -> tuple:
     """An orthonormal frame for a group, derived from its vertices: the yaw
     about Z whose footprint is tightest, with Z kept upright.
 
-    SketchUp gives every group its own axes and draws the selection box in
-    them, so the box hugs the object. Nothing stores those axes here yet (an
+    The usual convention gives every group its own axes and draws the
+    selection box in them, so the box hugs the object. Nothing stores those axes here yet (an
     imported group is baked to world coordinates, a classic group never had
     a frame), so they are derived — and derived *exactly*: the minimum-area
     rectangle around a point set always has a side flush with an edge of its

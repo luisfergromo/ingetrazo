@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors.
-"""SketchUp-style tool cursors: activating a tool turns the mouse pointer
+"""Tool cursors: activating a tool turns the mouse pointer
 into the tool's icon (aim cross at the hotspot); Select keeps the arrow."""
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ def test_tool_cursor_builds_bitmap_with_hotspot():
     hs = cur.hotSpot()
     assert (hs.x(), hs.y()) == (4, 28)         # (6,42) in 48-space → ×32/48
     ers = tool_cursor("eraser").hotSpot()
-    assert (ers.x(), ers.y()) == (9, 19)       # the rubber's working corner
+    assert (ers.x(), ers.y()) == (10, 21)      # middle of the rubber's accent end
     mv = tool_cursor("move").hotSpot()
     assert (mv.x(), mv.y()) == (16, 16)        # centre of the cross
     assert tool_cursor("select") is None       # Select keeps the arrow
     assert tool_cursor("no_such_tool") is None
     assert tool_cursor(None) is None
     assert tool_cursor("line") is cur          # cached
-    orb = tool_cursor("orbit")                 # wheel-drag shows it (SketchUp)
+    orb = tool_cursor("orbit")                 # wheel-drag shows it
     assert orb is not None and (orb.hotSpot().x(), orb.hotSpot().y()) == (16, 16)
     assert tool_cursor("pan") is not None
     zoom = tool_cursor("zoom")                 # Z shows the magnifier, not a cross

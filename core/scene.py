@@ -36,11 +36,16 @@ class Scene:
     mesh: Mesh = field(default_factory=Mesh)
     selection: set = field(default_factory=set)
     version: int = 0
+    #: How many of ``version``'s bumps changed only what is SHOWN -- the
+    #: selection -- and not the document. The GL caches key on ``version``
+    #: and need every bump; "unsaved changes" must not: a click on empty
+    #: space after Ctrl+S asked to save again (issue #159).
+    view_version: int = 0
     # Encapsulated chunks (own meshes), isolated from the main mesh's welding.
     groups: list = field(default_factory=list)
     # Annotation entities (static dimensions) — not geometry, drawn as overlays.
     dimensions: list = field(default_factory=list)
-    # Leader-text annotations (SketchUp's Text tool) — same overlay treatment.
+    # Leader-text annotations (the Text tool) — same overlay treatment.
     text_labels: list = field(default_factory=list)
     # Georef traced paths (roads / boundaries / alignments) — first-class georef
     # entities, kept out of the topology mesh entirely (Track G).
@@ -55,7 +60,7 @@ class Scene:
     # or photo you trace over. Display-only like the terrain and for the same
     # reason (invariant #4): reference to draw on top of, never topology.
     image_planes: list = field(default_factory=list)
-    # Layers / tags (SketchUp): labels with visibility + lock. The default
+    # Layers / tags: labels with visibility + lock. The default
     # layer always exists; entities reference layers by name.
     layers: list = field(default_factory=lambda: [
         __import__("core.layers", fromlist=["Layer"]).Layer(
@@ -66,7 +71,7 @@ class Scene:
     # attrs (color/texture) as the render truth and optionally carry
     # attrs["mat"] = name. See core/materials.py.
     materials: dict = field(default_factory=dict)
-    # Saved views (SketchUp's "Scenes"): named camera + layer-visibility
+    # Saved views ("Scenes"): named camera + layer-visibility
     # snapshots (core.saved_views.SavedView). Presentation state, no geometry.
     saved_views: list = field(default_factory=list)
     # Sheet compositions (core.composition.Composicion) — the print layouts.
@@ -92,7 +97,7 @@ class Scene:
     #: extremos no tiene para cambiarla», 2026-09-20).
     #: The camera the document was last saved with — target, distance, yaw,
     #: pitch, fov, perspective — so opening it shows what its author saw
-    #: (SketchUp keeps the camera in the file). ``None`` = never saved.
+    #: (.skp files keep the camera too). ``None`` = never saved.
     #: @pacaeiro, issue #60: «If I do a New drawing, or open a drawing, the
     #: Camera stays in the position where it was before».
     camera_home: dict | None = None
@@ -100,25 +105,30 @@ class Scene:
     #: every length is shown in, plus the decimals. Travels in the .igz;
     #: read through ``core.units`` (``fmt_len`` & co.).
     units: dict = field(default_factory=lambda: {"length": "m", "precision": 2})
+    #: Extensions' own document data, one JSON-safe value per extension key
+    #: (``views.extension_api.ExtensionApp.document_data``). Travels in the
+    #: .igz; the core never reads it. Changed through
+    #: ``core.history.SetPluginDataCommand`` so each edit is undoable.
+    plugin_data: dict = field(default_factory=dict)
     dimension_style: dict = field(default_factory=lambda: {
         "decimals": 2, "units": "m", "font_size": 9, "color": [45, 55, 75],
         "norma": "iso", "base_step_mm": 8.0, "ends": "arrow"})
     # Back-face tint override (RGB 0..1), e.g. adopted from an imported
     # .skp's style so unpainted faces read like they did for the author.
-    # ``None`` = the viewport's default SketchUp blue-grey.
+    # ``None`` = the viewport's default blue-grey.
     back_face_color: tuple | None = None
-    # Active display style (SketchUp Styles): face mode, edges, background.
+    # Active display style (Styles): face mode, edges, background.
     # The viewport reads it every frame; scenes snapshot it (core/style.py).
     display_style: object = field(default_factory=lambda: _make_style())
     # Sun shadows (core/sun.py): whether they draw, and the local date/time
     # the sun stands at. Document data — the shadow study is a deliverable.
     shadows: object = field(default_factory=lambda: _make_shadows())
-    # Section planes (SketchUp sections, core/section.py). At most ONE is
+    # Section planes (core/section.py). At most ONE is
     # ``active`` (the cut) in the model context; the two flags mirror
-    # SketchUp's View ▸ Section Planes / Section Cuts toggles.
+    # View ▸ Section Planes / Section Cuts toggles.
     section_planes: list = field(default_factory=list)
     show_section_planes: bool = True
-    # SketchUp's View ▸ Hidden Objects / Hidden Geometry: hidden objects
+    # View ▸ Hidden Objects / Hidden Geometry: hidden objects
     # (groups, components) and hidden geometry (faces, edges) are drawn
     # as a see-through grid and become selectable — the way back to
     # Unhide ▸ Selected. Never drawn normally: ``entity_visible`` stays
@@ -152,7 +162,7 @@ class Scene:
     # inside a group" keep working unchanged.
     edit_group: object | None = None
     _loose_mesh: object | None = None
-    #: The open contexts, outermost first — SketchUp's nested editing. Each
+    #: The open contexts, outermost first — nested editing. Each
     #: entry is ``{"group", "mesh", "share"}``: the group, the mesh ``scene.mesh``
     #: pointed at before entering it, and its pending instance share-back.
     _edit_stack: list = field(default_factory=list)
@@ -190,7 +200,7 @@ class Scene:
 
     @staticmethod
     def _object_hidden(entity) -> bool:
-        """SketchUp's Hide on an OBJECT (a group or component). Edges carry
+        """Hide on an OBJECT (a group or component). Edges carry
         a ``hidden`` of their own with older, narrower semantics (they stay
         in the topology and the draw passes skip them themselves), so only
         a group answers here."""
@@ -199,7 +209,7 @@ class Scene:
 
     @staticmethod
     def _face_hidden(entity) -> bool:
-        """SketchUp's Hide on a face: ``attrs["hidden"]``."""
+        """Hide on a face: ``attrs["hidden"]``."""
         attrs = getattr(entity, "attrs", None)
         return bool(attrs and attrs.get("hidden"))
 
@@ -230,7 +240,7 @@ class Scene:
         from core.purge import iter_groups
         return {g.uid: g for g in iter_groups(self.groups)}
 
-    # ---- Sections (SketchUp section planes) ----------------------------------
+    # ---- Sections (section planes) -------------------------------------------
     def active_section(self):
         """The section plane currently cutting the model, or ``None``."""
         for sp in self.section_planes:
@@ -240,13 +250,13 @@ class Scene:
 
     def set_active_section(self, plane) -> None:
         """Make ``plane`` the ONE active cut (None deactivates all) —
-        SketchUp: one active cut per context."""
+        one active cut per context."""
         for sp in self.section_planes:
             sp.active = sp is plane
 
     # ---- Group-edit context (Groups v2) --------------------------------------
     def begin_group_edit(self, group) -> None:
-        """Enter a group: tools and commands now edit ITS mesh (SketchUp's
+        """Enter a group: tools and commands now edit ITS mesh (the usual
         double-click-into-group).
 
         Entering a CHILD of the group already open pushes a level instead of
@@ -267,17 +277,26 @@ class Scene:
             self.end_group_edit()
         anterior = self.mesh
         self._edit_share = None
+        # The context's own axes (issue #44), read BEFORE anything below
+        # rewrites the placement: drawing inside a group happens on the
+        # group's axes, level by level.
+        from core.group import group_frame
+        frame = group_frame(group)
         if getattr(group, "children", None):
             # A container: its children stay children. What CANNOT stay is a
             # transform on it, because the tools work in world coordinates —
             # so the matrix is pushed down into the children and into its own
             # mesh, which leaves every world position exactly where it was.
             self._bake_container_xform(group)
+            if frame is not None:
+                # Its matrix went down into the children and its mesh is in
+                # world coordinates now: the axes stay, as world axes.
+                group.axes = frame
         elif getattr(group, "xform", None) is not None:
             # A component instance: the tools work in world coordinates, so
             # the session edits a world-space COPY of the definition. On
             # leaving, the copy goes back into the shared prototype (local
-            # coordinates) and every sibling shows the edit — SketchUp's
+            # coordinates) and every sibling shows the edit — classic
             # component editing. Make Unique first to edit one copy only.
             from core.group import transformed_mesh
             proto, xform = group.mesh, group.xform
@@ -288,7 +307,8 @@ class Scene:
         if not self._edit_stack:
             self._loose_mesh = anterior
         self._edit_stack.append(
-            {"group": group, "mesh": anterior, "share": self._edit_share})
+            {"group": group, "mesh": anterior, "share": self._edit_share,
+             "frame": frame})
         self.mesh = group.mesh
         self.edit_group = group
         self.selection.clear()
@@ -316,13 +336,17 @@ class Scene:
         for child in group.children:
             child.xform = xform * (child.xform if child.xform is not None
                                    else QMatrix4x4())
+        # An exploded view's offsets live in the container's frame, which
+        # has just become the world's.
+        from core.explode import rotate_offsets
+        rotate_offsets(group, xform)
         if group.mesh.vertices:
             from core.group import transformed_mesh
             group.mesh = transformed_mesh(group.mesh, xform)
         group.xform = QMatrix4x4()
 
     def end_one_group_edit(self) -> None:
-        """Leave the INNERMOST group only — SketchUp's Esc, which steps out
+        """Leave the INNERMOST group only — Esc, which steps out
         one level and leaves you inside the parent."""
         self._leave_level()
 
@@ -392,6 +416,16 @@ class Scene:
         group.xform = xform
 
     @property
+    def drawing_frame(self):
+        """The axes drawing happens on (issue #44): the world's (``None``)
+        at the top level, the open group's own axes inside it — a world
+        matrix whose columns are red, green, blue and whose translation is
+        the origin. Read by :mod:`core.axes`."""
+        if self._edit_stack:
+            return self._edit_stack[-1].get("frame")
+        return None
+
+    @property
     def loose_mesh(self):
         """The real loose mesh regardless of the edit context."""
         return self._loose_mesh if self.edit_group is not None else self.mesh
@@ -439,7 +473,7 @@ class Scene:
     def select(self, edges: Iterable, additive: bool = False,
                mode: str | None = None) -> None:
         """Put *edges* (any entities) into the selection the way *mode*
-        says — SketchUp's click modifiers: ``"replace"`` (a plain click),
+        says — the usual click modifiers: ``"replace"`` (a plain click),
         ``"add"`` (Ctrl), ``"toggle"`` (Shift: what is in goes out, what is
         out comes in) and ``"remove"`` (Shift+Ctrl). ``additive=True`` is
         the old spelling of ``"add"`` and still works; an explicit *mode*
@@ -457,12 +491,48 @@ class Scene:
             self.selection.difference_update(edges)
         else:
             self.selection.update(edges)
-        self.version += 1
+        self.bump_view()
 
     def clear_selection(self) -> None:
         if self.selection:
             self.selection.clear()
-            self.version += 1
+            self.bump_view()
+
+    def bump_view(self) -> None:
+        """A change of what is shown, not of the document (the selection):
+        the caches keyed on ``version`` refresh, the document stays clean."""
+        self.version += 1
+        self.view_version += 1
+
+    @property
+    def content_version(self) -> int:
+        """``version`` minus the view-only bumps: what "unsaved changes"
+        compares against the version that was saved."""
+        return self.version - self.view_version
+
+    def invert_selection(self) -> int:
+        """Edit ▸ Invert Selection (Ctrl+Shift+I): select every
+        entity of the open context that is NOT selected now, and drop what
+        is. The universe is Select All's — the loose edges and faces, the
+        context's groups (the model's, or the open group's children) and the
+        dimensions — minus what a click or a box could not pick either:
+        hidden objects and faces, hidden or locked layers, and hidden edges
+        (a smoothed surface's inner edges) while the hidden-geometry view is
+        off. Returns the size of the new selection."""
+        ctx = self.edit_group
+        groups = self.groups if ctx is None else (getattr(ctx, "children", None) or [])
+        show_hidden = bool(self.show_hidden_geometry)
+        universe = [e for e in self.edges
+                    if self.entity_selectable(e)
+                    and (show_hidden or not getattr(e, "hidden", False))]
+        universe += [f for f in self.faces if self.entity_selectable(f)]
+        universe += [g for g in groups if self.entity_selectable(g)]
+        universe += [d for d in self.dimensions if self.entity_selectable(d)]
+        new = [ent for ent in universe if ent not in self.selection]
+        self.selection.clear()
+        self.selection.update(new)
+        self.bump_view()             # the GL colour caches are keyed on it
+        return len(new)
 
     def delete_selection(self) -> None:
         if not self.selection:
@@ -482,7 +552,7 @@ class Scene:
                 or self.tile_layer or self.geo_paths or self.terrain
                 or self.guides or self.geo_points or self.text_labels
                 or self.saved_views or self.compositions
-                or self.image_planes):
+                or self.image_planes or self.plugin_data):
             self.mesh.clear()
             self.groups.clear()
             self.dimensions.clear()
@@ -494,6 +564,7 @@ class Scene:
             self.saved_views.clear()
             self.compositions.clear()
             self.custom_scales.clear()
+            self.plugin_data = {}
             self.selection.clear()
             from core.layers import DEFAULT_LAYER, Layer
             self.layers = [Layer(DEFAULT_LAYER)]
@@ -513,6 +584,7 @@ class Scene:
         # Outside the guard: an empty document has a camera to forget too.
         self.camera_home = None
         self.units = {"length": "m", "precision": 2}
+        self.plugin_data = {}
 
     # ---- Queries ------------------------------------------------------------
     def iter_world_faces(self):
@@ -526,6 +598,53 @@ class Scene:
         for g, m in self.placements():
             for f in g.mesh.faces:
                 yield f, m
+
+    def selection_bounds(self) -> tuple[QVector3D, QVector3D] | tuple[None, None]:
+        """Axis-aligned bounding box of the SELECTION — what Zoom Selection
+        frames, as ``bounds()`` is what Zoom Extents frames. ``(None, None)``
+        when nothing selected has a place in space.
+
+        Loose edges and faces, whole groups (nested placements included,
+        vectorized per mesh like ``bounds()``), dimensions and reference
+        images. Not cached: it runs once per command, over the selection
+        only."""
+        import numpy as np
+        from core.group import iter_placements
+        pts: list = []
+
+        def add(p: QVector3D) -> None:
+            pts.append((p.x(), p.y(), p.z()))
+
+        for ent in self.selection:
+            if hasattr(ent, "mesh"):          # Group / component instance
+                for g, m in iter_placements(ent):
+                    verts = g.mesh.vertices
+                    if not verts:
+                        continue
+                    arr = np.array([[v.position.x(), v.position.y(),
+                                     v.position.z()] for v in verts])
+                    if m is not None:
+                        d = m.data()          # column-major
+                        rot = np.array([[d[0], d[4], d[8]],
+                                        [d[1], d[5], d[9]],
+                                        [d[2], d[6], d[10]]])
+                        arr = arr @ rot.T + np.array([d[12], d[13], d[14]])
+                    pts.append(tuple(arr.min(axis=0)))
+                    pts.append(tuple(arr.max(axis=0)))
+            elif hasattr(ent, "vertices"):    # Face
+                for v in ent.vertices:
+                    add(v)
+            elif hasattr(ent, "corners"):     # ImagePlane
+                for c in ent.corners():
+                    add(c)
+            elif hasattr(ent, "a") and hasattr(ent, "b"):    # Edge, Dimension
+                add(ent.a)
+                add(ent.b)
+        if not pts:
+            return None, None
+        arr = np.array(pts, dtype=float)
+        lo, hi = arr.min(axis=0), arr.max(axis=0)
+        return QVector3D(*lo), QVector3D(*hi)
 
     def bounds(self) -> tuple[QVector3D, QVector3D] | tuple[None, None]:
         """Axis-aligned bounding box of all geometry. ``(None, None)`` if empty.
@@ -574,12 +693,20 @@ class Scene:
             if self.entity_visible(face):
                 for v in face.vertices:
                     absorb(v)
+        # One vertex array per MESH, not per placement: a model of 21 406
+        # placements over 2 722 meshes read 14 million vertices one by one
+        # to learn its box, ~7 s (issue #158).
+        per_mesh: dict = {}
         for g, m in self.placements():
             verts = g.mesh.vertices
             if not verts:
                 continue
-            arr = np.array([[v.position.x(), v.position.y(), v.position.z()]
-                            for v in verts])
+            key = id(g.mesh)
+            arr = per_mesh.get(key)
+            if arr is None:
+                arr = per_mesh[key] = np.array(
+                    [[v.position.x(), v.position.y(), v.position.z()]
+                     for v in verts])
             if m is not None:
                 d = m.data()          # column-major
                 rot = np.array([[d[0], d[4], d[8]],

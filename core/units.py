@@ -11,6 +11,7 @@ fractional forms the precision field picks the finest denominator:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from fractions import Fraction
 
 IN_M = 0.0254
@@ -72,10 +73,12 @@ def format_length(metres: float, units: str = "m", decimals: int = 2) -> str:
 
 DEFAULT_MODEL_UNITS = {"length": "m", "precision": 2}
 
+# English source strings, translated where they are shown (issue #65: the
+# labels were written in Spanish, so an English UI showed Spanish).
 UNIT_LABELS = {
     "m": "Metres (m)", "cm": "Centimetres (cm)", "mm": "Millimetres (mm)",
     "in": "Decimal inches (in)", "ft": "Decimal feet (ft)",
-    "ft-in": "Feet and inches (1'6\")", "in-frac": "Fractional inches",
+    "ft-in": "Feet and inches (1\'6\")", "in-frac": "Fractional inches",
     "ft-in-frac": "Fractional feet and inches",
 }
 
@@ -105,6 +108,46 @@ def model_units_of(scene) -> dict:
     return dict(DEFAULT_MODEL_UNITS)
 
 
+#: QSettings key of the units a NEW document starts with (issue #121: «I
+#: model every part in millimetres» — the unit was lost with each new file).
+NEW_DOCUMENT_KEY = "units/new_document"
+
+
+def new_document_units() -> dict:
+    """The units a new, empty document starts with: the ones the user last
+    chose «for new documents» in Preferences, or metres. Opening a file never
+    reads this — a document keeps its own units (an old .igz without them is
+    in metres, as it was drawn)."""
+    import json
+
+    from PySide6.QtCore import QSettings
+    try:
+        raw = QSettings().value(NEW_DOCUMENT_KEY)
+        return model_units_of({"units": json.loads(raw)} if raw else {})
+    except (TypeError, ValueError):
+        return dict(DEFAULT_MODEL_UNITS)
+
+
+def remember_new_document_units(units: dict) -> None:
+    import json
+
+    from PySide6.QtCore import QSettings
+    st = QSettings()
+    st.setValue(NEW_DOCUMENT_KEY, json.dumps(model_units_of({"units": units})))
+    st.sync()
+
+
+def apply_units(scene, units: dict) -> None:
+    """Give ``scene`` these units; the dimension style follows them, as the
+    Preferences dialog has always done."""
+    chosen = model_units_of({"units": units})
+    scene.units = chosen
+    style = getattr(scene, "dimension_style", None)
+    if isinstance(style, dict):
+        style["units"] = chosen["length"]
+        style["decimals"] = chosen["precision"]
+
+
 def model_units() -> dict:
     return model_units_of(_SCENE)
 
@@ -119,19 +162,60 @@ def model_precision() -> int:
 
 def unit_label(code: str) -> str:
     from core.i18n import tr
-    return tr(UNIT_LABELS.get(code, code))
+    return tr(UNIT_LABELS[code]) if code in UNIT_LABELS else code
+
+
+#: Set while the value being read is not a length (see ``unitless_numbers``).
+_UNITLESS = False
 
 
 def bare_number_scale() -> float:
     """Metres per unit for a number typed without a unit: ``2`` is 2 m in
-    a metric document and 2 mm in a millimetre one."""
+    a metric document and 2 mm in a millimetre one -- and 1 while
+    ``unitless_numbers`` holds, when the number is not a length."""
+    if _UNITLESS:
+        return 1.0
     return _BARE_SCALE.get(model_unit(), 1.0)
+
+
+@contextmanager
+def unitless_numbers():
+    """Read typed numbers as they are: an angle, a scale factor or a side
+    count has no unit, so the document's must not touch it -- «45» in a
+    millimetre model was a turn of 0.045° (#176). A field that does carry
+    a unit («2m») still converts."""
+    global _UNITLESS
+    before, _UNITLESS = _UNITLESS, True
+    try:
+        yield
+    finally:
+        _UNITLESS = before
 
 
 def fmt_len(metres: float) -> str:
     """A length in the model's units and precision — the one formatter
     every readout uses (tool labels, Entity Info, status bar)."""
     return format_length(float(metres), model_unit(), model_precision())
+
+
+#: The mark a bare typed number gets in each unit: what the number MEANS
+#: (``bare_number_scale``), shown while it is typed.
+_TYPED_MARK = {"m": " m", "cm": " cm", "mm": " mm", "in": '"', "ft": "'",
+               "ft-in": '"', "in-frac": '"', "ft-in-frac": '"'}
+
+
+def typed_value_text(buffer: str) -> str:
+    """What the user is typing in the VCB, as the canvas shows it: a bare
+    number (or a ``a,b`` / ``a;b`` list of them) gets the model's unit, the
+    one it will be read in -- «500» in a millimetre document is 500 mm, and
+    showing «500 m» told the user the opposite (issue #149). Anything that
+    already carries a unit or a mark is shown as typed."""
+    import re
+
+    text = (buffer or "").strip()
+    if text and re.fullmatch(r"[-+]?[\d.]+(\s*[,;]\s*[-+]?[\d.]+)*", text):
+        return text + _TYPED_MARK.get(model_unit(), " m")
+    return text
 
 
 def fmt_num(metres: float) -> str:
@@ -151,6 +235,38 @@ def fmt_pair(a: float, b: float) -> str:
     if u in ("m", "cm", "mm"):
         return f"{fmt_num(a)} × {fmt_len(b)}"
     return f"{fmt_len(a)} × {fmt_len(b)}"
+
+
+#: The fewest decimals that still resolve a millimetre (or 1/16") in each
+#: unit — what a parts list needs whatever the document's display
+#: precision is: a 4 mm hinge leaf in a document shown to the centimetre
+#: read «0.00 m» and looked like a sheet with no thickness at all.
+_FINE_DECIMALS = {"m": 3, "cm": 1, "mm": 0, "in": 2, "ft": 3,
+                  "ft-in": 2, "in-frac": 2, "ft-in-frac": 2}
+
+
+def fine_precision() -> int:
+    """The document's precision, raised to millimetre resolution."""
+    return max(model_precision(), _FINE_DECIMALS.get(model_unit(), 3))
+
+
+def fmt_len_fine(metres: float) -> str:
+    """:func:`fmt_len` at least to the millimetre — for part sizes and cut
+    lists, where a thickness is the number that matters."""
+    return format_length(float(metres), model_unit(), fine_precision())
+
+
+def fmt_triple(a: float, b: float, c: float, fine: bool = False) -> str:
+    """``0.58 × 0.45 × 0.04 m`` — a part's length × width × thickness, in
+    the same idiom as :func:`fmt_pair`. ``fine`` resolves the millimetre
+    (:func:`fmt_len_fine`)."""
+    u = model_unit()
+    n = fine_precision() if fine else model_precision()
+    if u in ("m", "cm", "mm"):
+        factor = {"m": 1.0, "cm": 100.0, "mm": 1000.0}[u]
+        a_, b_ = (f"{float(v) * factor:.{n}f}" for v in (a, b))
+        return f"{a_} × {b_} × {format_length(float(c), u, n)}"
+    return " × ".join(format_length(float(v), u, n) for v in (a, b, c))
 
 
 def fmt_area(square_metres: float) -> str:

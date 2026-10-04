@@ -248,8 +248,8 @@ def section_loops(cut_edges, tol: float | None = None) -> list:
     A watertight solid triangulated conformingly yields chords whose
     endpoints meet two by two, so walking the adjacency closes every ring;
     a chain that dead-ends (an open surface: a lone wall face, a roof
-    without walls) is dropped rather than filled — SketchUp's own section
-    fill leaks on those, we prefer to leave them white. Nested rings (a
+    without walls) is dropped rather than filled — a section fill would
+    leak on those, we prefer to leave them white. Nested rings (a
     hollow wall, a pipe) are the caller's even-odd fill rule."""
     if not len(cut_edges):
         return []
@@ -553,8 +553,9 @@ def _geometry_as_lists(tris, hard, soft, soft_n):
 
 #: Line classes of a drawing, per segment (``HlrDrawing.kinds``).
 KIND_EDGE = 0        #: a plain edge between two visible faces
-KIND_PROFILE = 1     #: silhouette / outline against the background (SketchUp's Profiles)
+KIND_PROFILE = 1     #: silhouette / outline against the background (Profiles)
 KIND_CUT = 2         #: the section plane slicing through a solid
+KIND_HIDDEN = 3      #: the part of an edge something stands in front of (dashed)
 
 
 class HlrDrawing:
@@ -579,7 +580,7 @@ class HlrDrawing:
 def _surface_at(p, depth, tv2, tvz, tol) -> bool:
     """Does any of the triangles (K,3,2)/(K,3) cover the camera-plane point
     ``p`` with a surface no farther than ``depth + tol``? The adjacency test
-    behind SketchUp's Profiles: a visible edge with a covered point on each
+    behind Profiles: a visible edge with a covered point on each
     side runs between two surfaces; an uncovered side is the background (or
     a surface well behind) — the edge outlines the shape."""
     if not len(tv2):
@@ -599,6 +600,94 @@ def _surface_at(p, depth, tv2, tvz, tol) -> bool:
         return False
     z = l0 * tvz[:, 0] + l1 * tvz[:, 1] + l2 * tvz[:, 2]
     return bool(np.any(inside & (z <= depth + tol)))
+
+
+def _drop_hidden_under_visible(segs, world, kinds, tol: float):
+    """A hidden line that falls on a visible one is not drawn — the
+    visible line wins (the back edges of a wall seen from the front lie
+    exactly under its front outline). Segments are grouped by their line
+    (direction and offset, rounded), so this stays linear in the drawing
+    and each hidden piece is only compared with the visible pieces on its
+    own line."""
+    hid = np.nonzero(kinds == KIND_HIDDEN)[0]
+    if not len(hid):
+        return segs, world, kinds
+    atol = 1e-6                                   # radians
+    inv_d = 1.0 / max(tol, 1e-12)
+
+    def key_and_span(row):
+        x0, y0, x1, y1 = row
+        dx, dy = x1 - x0, y1 - y0
+        ln = math.hypot(dx, dy)
+        if ln < 1e-15:
+            return None
+        ux, uy = dx / ln, dy / ln
+        if ux < -1e-12 or (abs(ux) <= 1e-12 and uy < 0):
+            ux, uy = -ux, -uy                     # one direction per line
+        ang = math.atan2(uy, ux)
+        off = ux * y0 - uy * x0                   # signed distance of line
+        t0, t1 = ux * x0 + uy * y0, ux * x1 + uy * y1
+        return ((round(ang / atol), round(off * inv_d)),
+                (min(t0, t1), max(t0, t1)))
+
+    lines: dict = {}
+    for i in np.nonzero(kinds != KIND_HIDDEN)[0]:
+        ks = key_and_span(segs[i])
+        if ks is not None:
+            lines.setdefault(ks[0], []).append(ks[1])
+    if not lines:
+        return segs, world, kinds
+    keep_s, keep_w, keep_k = [], [], []
+    for i in range(len(segs)):
+        if kinds[i] != KIND_HIDDEN:
+            keep_s.append(segs[i]); keep_w.append(world[i])
+            keep_k.append(kinds[i])
+            continue
+        ks = key_and_span(segs[i])
+        if ks is None:
+            continue
+        (ka, ko), (lo, hi) = ks
+        # Hidden pieces already kept cover the line too: a box's front and
+        # back edges fall on the same line on paper, once is enough.
+        lines_here = lines
+        cover = []
+        for da in (-1, 0, 1):
+            for do in (-1, 0, 1):
+                cover.extend(lines.get((ka + da, ko + do), ()))
+        if not cover:
+            keep_s.append(segs[i]); keep_w.append(world[i])
+            keep_k.append(kinds[i])
+            lines_here.setdefault((ka, ko), []).append((lo, hi))
+            continue
+        span = hi - lo
+        if span < 1e-15:
+            continue
+        cover = sorted(((max(0.0, (c0 - lo) / span),
+                         min(1.0, (c1 - lo) / span))
+                        for c0, c1 in cover if c1 > lo and c0 < hi))
+        merged: list = []
+        for c0, c1 in cover:
+            if merged and c0 <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], c1))
+            else:
+                merged.append((c0, c1))
+        # The segment may run either way along its line.
+        x0, y0, x1, y1 = segs[i]
+        ux = (x1 - x0) / (math.hypot(x1 - x0, y1 - y0))
+        uy = (y1 - y0) / (math.hypot(x1 - x0, y1 - y0))
+        forward = ux > 1e-12 or (abs(ux) <= 1e-12 and uy > 0)
+        w0, w1 = world[i, 0, :], world[i, 1, :]
+        for t0, t1 in subtract_spans([(0.0, 1.0)], merged):
+            a, b = (t0, t1) if forward else (1.0 - t1, 1.0 - t0)
+            keep_s.append((x0 + a * (x1 - x0), y0 + a * (y1 - y0),
+                           x0 + b * (x1 - x0), y0 + b * (y1 - y0)))
+            keep_w.append((w0 + a * (w1 - w0), w0 + b * (w1 - w0)))
+            keep_k.append(KIND_HIDDEN)
+            lines_here.setdefault((ka, ko), []).append(
+                (lo + t0 * span, lo + t1 * span))
+    return (np.asarray(keep_s, dtype=float).reshape(-1, 4),
+            np.asarray(keep_w, dtype=float).reshape(-1, 2, 3),
+            np.asarray(keep_k, dtype=np.int8))
 
 
 def _merge_collinear(segs, world, kinds, tol: float):
@@ -680,12 +769,13 @@ def _merge_collinear(segs, world, kinds, tol: float):
 
 
 def hlr_drawing(scene, camera, geometry=None, profiles: bool = True,
-                fills: bool = True, caps: bool = True) -> HlrDrawing:
+                fills: bool = True, caps: bool = True,
+                hidden: bool = False) -> HlrDrawing:
     """The full line drawing of *scene* under *camera* (parallel): visible
     segments classified as edge / profile / cut, plus the section-cut
     rings to fill. :func:`hlr_view` is the segments-only view of this.
 
-    Profiles (SketchUp's): soft edges where the surface turns away from the
+    Profiles: soft edges where the surface turns away from the
     eye (and open boundaries), and hard edges with the background on one
     side — tested in 2D a hair off the visible segment's midpoint, so a
     lone face's outline, a box's contour and the eave of a roof all come out
@@ -702,6 +792,13 @@ def hlr_drawing(scene, camera, geometry=None, profiles: bool = True,
     outline of the cut always survives. ``caps=False`` draws the open
     silhouette instead.
 
+    Hidden lines (``hidden=True``, issue #81, @pacaeiro: «I expected that
+    Hidden line will show hidden lines of the model as dashed lines —
+    that's the standard»): the parts of the hard edges that something
+    stands in front of come back too, as KIND_HIDDEN, for the sheet to ink
+    dashed. What lies inside the material behind a section cut stays out,
+    as on a drawn section; silhouettes and cut chords have no hidden part.
+
     ``geometry`` — optional pre-collected arrays ``(tris, hard, soft,
     soft_n)`` as ``Viewport.hlr_geometry()`` returns them (world space:
     tris (T,3,3), hard (E,2,3), soft (S,2,3), soft_n (S,2,3) with NaN for
@@ -713,7 +810,7 @@ def hlr_drawing(scene, camera, geometry=None, profiles: bool = True,
         tris, hard, soft = collect_geometry(scene)
     else:
         tris, hard, soft, soft_n = geometry
-    # Active section cut (SketchUp): the composer's sheets honour it — the
+    # Active section cut: the composer's sheets honour it — the
     # whole reason sections exist here (plans and cross-cuts on paper).
     sp = (scene.active_section()
           if getattr(scene, "show_section_cuts", True)
@@ -833,14 +930,30 @@ def hlr_drawing(scene, camera, geometry=None, profiles: bool = True,
             else:
                 spans = visible_spans(a2, b2, az, bz,
                                       tv2[idx], tvz[idx], eps)
-        if cap_abg is not None and spans:
+        # The hidden part: the rest of the edge, before the section cap
+        # takes what lies inside the material (that is not drawn at all).
+        hid = (subtract_spans([(0.0, 1.0)], spans)
+               if hidden and i < n_hard else [])
+        if cap_abg is not None and (spans or hid):
             elo = np.minimum(a2, b2)
             ehi = np.maximum(a2, b2)
             if not (ehi[0] < cap_box[0][0] or elo[0] > cap_box[1][0]
                     or ehi[1] < cap_box[0][1] or elo[1] > cap_box[1][1]):
-                spans = subtract_spans(
-                    spans, cap_hidden_spans(a2, b2, az, bz, cap_P, cap_Q,
-                                            cap_abg, cap_eps))
+                inside = cap_hidden_spans(a2, b2, az, bz, cap_P, cap_Q,
+                                          cap_abg, cap_eps)
+                spans = subtract_spans(spans, inside)
+                hid = subtract_spans(hid, inside)
+        for t0, t1 in hid:
+            if (t1 - t0) < 1e-9:
+                continue
+            p = a2 + t0 * (b2 - a2)
+            q = a2 + t1 * (b2 - a2)
+            if math.hypot(q[0] - p[0], q[1] - p[1]) < zero_len:
+                continue
+            out.append((p[0], p[1], q[0], q[1]))
+            out_k.append(KIND_HIDDEN)
+            w0, w1 = E[i, 0, :], E[i, 1, :]
+            out_w.append((w0 + t0 * (w1 - w0), w0 + t1 * (w1 - w0)))
         for t0, t1 in spans:
             if (t1 - t0) < 1e-9:
                 continue
@@ -881,6 +994,9 @@ def hlr_drawing(scene, camera, geometry=None, profiles: bool = True,
     if len(segs) > 1:
         segs, world, kinds = _merge_collinear(segs, world, kinds,
                                               ext_e * 1e-9)
+    if hidden and len(segs):
+        segs, world, kinds = _drop_hidden_under_visible(
+            segs, world, kinds, max(ext_e * 1e-6, 1e-9))
     return HlrDrawing(segs, world, kinds, loops if fills else [])
 
 
@@ -902,3 +1018,159 @@ def hlr_view(scene, camera, return_world: bool = False, geometry=None):
     if not return_world:
         return d.segs
     return d.segs, d.world
+
+
+# ── Perspective ─────────────────────────────────────────────────────────────
+# The hidden-line pass above is parallel. A perspective turns into a parallel
+# view by the projective map (x, y, z) → (x/w, y/w, 1/w): lines stay lines
+# and planes stay planes, and 1/w orders the depth. Clipped to the view
+# pyramid first — a point beside or behind the eye has no picture.
+
+#: The view pyramid in clip space, as rows ``a`` with the kept side a·p ≥ 0:
+#: left, right, bottom, top, near.
+_PYRAMID = np.array([[1, 0, 0, 1], [-1, 0, 0, 1], [0, 1, 0, 1],
+                     [0, -1, 0, 1], [0, 0, 1, 1]], dtype=np.float64)
+
+
+def _clip_polygon(poly):
+    """Sutherland–Hodgman against the view pyramid, in clip space."""
+    for a in _PYRAMID:
+        out = []
+        n = len(poly)
+        for i in range(n):
+            p, q = poly[i], poly[(i + 1) % n]
+            dp, dq = float(a @ p), float(a @ q)
+            if dp >= 0.0:
+                out.append(p)
+            if (dp >= 0.0) != (dq >= 0.0):
+                out.append(p + (q - p) * (dp / (dp - dq)))
+        poly = out
+        if len(poly) < 3:
+            return []
+    return poly
+
+
+def _clip_triangles(C):
+    """(T,3,4) clip-space triangles → the parts inside the pyramid."""
+    if not len(C):
+        return C
+    D = C @ _PYRAMID.T                                  # (T,3,5)
+    inside = (D >= 0.0).all(axis=(1, 2))
+    outside = (D < 0.0).all(axis=1).any(axis=1)
+    parts = [C[inside]]
+    for tri in C[~inside & ~outside]:
+        poly = _clip_polygon(list(tri))
+        for i in range(1, len(poly) - 1):
+            parts.append(np.stack([poly[0], poly[i], poly[i + 1]])[None])
+    return np.concatenate(parts)
+
+
+def _clip_segments(A, B):
+    """Clip-space segments (E,4) → the parts inside the pyramid."""
+    if not len(A):
+        return A, B
+    t0 = np.zeros(len(A))
+    t1 = np.ones(len(A))
+    keep = np.ones(len(A), dtype=bool)
+    for a in _PYRAMID:
+        da, db = A @ a, B @ a
+        keep &= ~((da < 0.0) & (db < 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = da / (da - db)
+        t0 = np.where(da < 0.0, np.maximum(t0, t), t0)
+        t1 = np.where(db < 0.0, np.minimum(t1, t), t1)
+    keep &= t0 < t1
+    A, B, t0, t1 = A[keep], B[keep], t0[keep, None], t1[keep, None]
+    d = B - A
+    return A + d * t0, A + d * t1
+
+
+def hlr_perspective(scene, camera, geometry=None) -> np.ndarray:
+    """Visible edge segments of *scene* in *camera*'s PERSPECTIVE (the
+    two-point one included), (N, 4) as (x0, y0, x1, y1) in metres on the
+    picture plane through the target — what sits at the target's depth
+    comes out true size — with the origin at the centre of the view. Only
+    what the view shows: the drawing is cut at the window's edges.
+
+    ``geometry`` as for :func:`hlr_drawing`. The section in force cuts the
+    model; its poché does not hide what lies behind it here."""
+    from core.camera import OrbitCamera
+
+    soft_n = None
+    if geometry is None:
+        tris, hard, soft = collect_geometry(scene)
+    else:
+        tris, hard, soft, soft_n = geometry
+    sp = (scene.active_section()
+          if getattr(scene, "show_section_cuts", True)
+          and hasattr(scene, "active_section") else None)
+    cut: list = []
+    if sp is not None:
+        if soft_n is not None:
+            tris, hard, soft = _geometry_as_lists(tris, hard, soft, soft_n)
+            soft_n = None
+        tris, hard, soft, cut = clip_to_section(tris, hard, soft, sp,
+                                                split_cuts=True)
+    if soft_n is None:                  # tuple lists → arrays
+        soft_n = np.array([[na, nb if nb is not None else (np.nan,) * 3]
+                           for _p0, _p1, na, nb in soft],
+                          dtype=np.float64).reshape(-1, 2, 3)
+        soft = np.array([[p0, p1] for p0, p1, _na, _nb in soft],
+                        dtype=np.float64).reshape(-1, 2, 3)
+    tris = np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3)
+    soft = np.asarray(soft, dtype=np.float64).reshape(-1, 2, 3)
+    soft_n = np.asarray(soft_n, dtype=np.float64).reshape(-1, 2, 3)
+    lines = [np.asarray(hard, dtype=np.float64).reshape(-1, 2, 3),
+             np.asarray(cut, dtype=np.float64).reshape(-1, 2, 3)]
+    if len(soft):
+        # A soft edge is a profile where its two faces turn opposite ways
+        # to the EYE — in perspective the sight line differs per edge.
+        eye = camera.eye()
+        e = np.array([eye.x(), eye.y(), eye.z()], dtype=np.float64)
+        v = soft.mean(axis=1) - e
+        fa = np.einsum("ij,ij->i", soft_n[:, 0], v)
+        fb = np.einsum("ij,ij->i", soft_n[:, 1], v)
+        lines.append(soft[np.isnan(fb) | ((fa < 0.0) != (fb < 0.0))])
+    E = np.concatenate(lines)
+
+    m = camera.projection_matrix() * camera.view_matrix()
+    M = np.array(m.data(), dtype=np.float64).reshape(4, 4, order="F")
+
+    def to_clip(p):
+        return p @ M[:, :3].T + M[:, 3]
+
+    t = camera.target
+    w_t = float(to_clip(np.array([t.x(), t.y(), t.z()]))[3])
+    if w_t <= 1e-9:
+        return np.empty((0, 4))
+    half_h = w_t * math.tan(math.radians(camera.fov_deg) / 2.0)
+    scale = np.array([half_h * camera.aspect, half_h, w_t])
+
+    def to_parallel(c):
+        # (x/w, y/w) scaled to metres at the target's depth; w_t/w for the
+        # depth, which grows toward the eye.
+        w = c[..., 3:4]
+        return np.concatenate([c[..., :2] / w, 1.0 / w], axis=-1) * scale
+
+    T = _clip_triangles(to_clip(tris.reshape(-1, 3)).reshape(-1, 3, 4))
+    A, B = _clip_segments(to_clip(E[:, 0]), to_clip(E[:, 1]))
+    if not len(A):
+        return np.empty((0, 4))
+    T = to_parallel(T)
+    L = np.stack([to_parallel(A), to_parallel(B)], axis=1)
+    # A parallel camera looking down −Z onto that space: x right, y up, and
+    # the depth growing away from it.
+    top = OrbitCamera()
+    top.perspective = False
+    top.target = type(camera.target)(0.0, 0.0, 0.0)
+    top.yaw, top.pitch = -math.pi / 2.0, math.pi / 2.0
+    top.distance = float(max(T[..., 2].max() if len(T) else 0.0,
+                             L[..., 2].max())) + 1.0
+
+    class _NoSection:
+        pass
+
+    d = hlr_drawing(_NoSection(), top,
+                    geometry=(T, L, np.empty((0, 2, 3)), np.empty((0, 2, 3))),
+                    profiles=False, fills=False, caps=False)
+    return d.segs

@@ -1,15 +1,19 @@
 # IngeTrazo
 
-**A free, SketchUp-inspired 3D modeler for architecture, civil engineering, and 3D printing — built natively for Linux.**
+*Pronounced **EEN-heh-TRAH-soh** — from Spanish* inge(niería) *"engineering"
++* trazo *"a drawn stroke": the engineer's stroke.*
+
+**A free 3D modeler for architecture, engineering and 3D design — draw as if by hand, built natively for Linux.**
 
 ![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 ![CI](https://github.com/ingelibre/ingetrazo/actions/workflows/ci.yml/badge.svg)
 ![Status: usable](https://img.shields.io/badge/status-usable%20·%200.3.x-brightgreen)
-![Platform: Linux · Windows · macOS (from source)](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20(source)-informational)
+![Platform: Linux · Windows · macOS](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-informational)
 ![Made in Peru](https://img.shields.io/badge/made%20in-Peru%20%F0%9F%87%B5%F0%9F%87%AA-red)
 
-IngeTrazo brings SketchUp-style *push/pull* modeling to Linux — where there is
-almost no native CAD for civil engineers and architects. It is freeform at the
+IngeTrazo brings *push/pull* modeling to Linux — where there is
+almost no native CAD for civil engineers and architects, and for anyone who
+designs in 3D (furniture, objects, scenes, models). It is freeform at the
 core (draw anything, like sketching by hand) with an **optional BIM tagging
 layer** planned on top: mark geometry as `IfcWall` / `IfcSlab` / `IfcColumn`,
 export to IFC, and close the loop **model → tag → quantity takeoff → budget**
@@ -22,8 +26,7 @@ with its sister project [IngePresupuestos](https://ingepresupuestos.com).
 ## Status
 
 **Usable — real work gets done in it today.** Draw, extrude, edit, paint,
-dimension and annotate; open any SketchUp file from 2013 to 2026 and save
-back to `.skp`; tag BIM classes and export IFC quantities; georeference and
+dimension and annotate; open `.skp` files from 2013 to 2026; tag BIM classes and export IFC quantities; georeference and
 import survey data. IngeTrazo is developed by dogfooding on real engineering
 projects, backed by ~2,000 automated tests, and its geometry engine refuses
 to commit a broken solid (the hermeticity guard) — your quantities stay
@@ -61,27 +64,15 @@ Python, Qt and the pure-Python `.skp` reader travel inside; nothing else to
 install. `--check` prints what the install found and exits non-zero if
 anything is missing.
 
-- **macOS**: no packaged build yet — and, honestly, **no Mac here to test
-  one on**. Nothing in IngeTrazo is platform-specific (Python, Qt, OpenGL
-  3.3 core; every native dependency ships wheels for Intel and Apple
-  Silicon), so it should run from source. If you have a Mac, this is the
-  five-minute test that would let us ship a `.app`: you need Python 3.12+
-  (python.org or Homebrew), then
-
-```bash
-git clone https://github.com/ingelibre/ingetrazo.git
-cd ingetrazo/app
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
-
-  Then please [open an issue](https://github.com/ingelibre/ingetrazo/issues)
-  saying whether it opens, whether the 3D view is smooth, and pasting
-  anything the Terminal prints. Known gaps on macOS: DWG import (`dwg2dxf`
-  is Linux-only for now) and the optional `skp2dae` converter (Wine); the
-  native `.skp` reader and writer work everywhere. The first `.app` will be
-  unsigned — right-click ▸ Open the first time.
+- **macOS** (Apple Silicon, M1 and later): download
+  `IngeTrazo-<version>-macos-arm64.dmg` from the
+  [latest release](https://github.com/ingelibre/ingetrazo/releases/latest),
+  open it and drag IngeTrazo to Applications. The app is not signed yet, so
+  the first time right-click it ▸ Open. Known gap on macOS: DWG import
+  (`dwg2dxf` is Linux-only for now); the native `.skp` reader works
+  everywhere. If something fails, please
+  [open an issue](https://github.com/ingelibre/ingetrazo/issues) and paste
+  anything the Terminal prints.
 
 Something to open right away: [`examples/`](examples/) holds four real
 documents from the Yanque plaza project — the fountain, the bench with its
@@ -91,49 +82,66 @@ welcome arch with all its rebar (also attached to every release as
 
 ## What works today
 
-- **SketchUp-style viewport** — Z-up orbit camera, grid, colored axes,
-  perspective ↔ parallel, standard views, zoom-extents, hidden-line removal.
+- **Viewport** — Z-up camera that orbits around the point under the cursor,
+  grid, colored axes, perspective ↔ parallel and two-point perspective,
+  standard views, zoom-extents, hidden-line removal, real-sun shadows.
+- **Walkthrough** — Position Camera, Walk and Look Around at eye height.
 - **Drawing tools** — Line, Rectangle, Rotated Rectangle, Circle, Polygon,
   Arc (2-point) and 3-Point Arc, with inferencing, snapping, axis locks and a
-  Value Control Box (type exact lengths/coordinates).
+  Value Control Box (type exact lengths/coordinates, `200,100` or `200;100`
+  for two values), plus Freehand, Pie, 3D Text and images. **Repeat the last
+  command** with Shift+R or from the right-click menu.
 - **Push/Pull** — robust, watertight extrude / recess / step / through-hole,
   solid-aware, with a **BIM-grade hermeticity guard** (never commits a broken
   solid — the difference that makes the geometry valid for quantity takeoff).
 - **Offset** — walls with real thickness from a face outline.
-- **Move** — with snap, inference and exact measured input.
+- **Follow Me** and **Fillet** — sweep a profile along a path; round a corner.
+- **Move, Scale, Flip** — with snap, inference and exact measured input.
+- **Tape Measure & guides** — guide points and lines that every tool snaps
+  to, Push/Pull included (stop a face exactly at a guide's height).
+- **Eraser, Hide/Unhide, Invert Selection, Intersect Faces.**
+- **Solid tools** — Outer Shell, Union, Subtract, Trim, Intersect, Split.
+- **Section planes** — live cuts with section fill.
 - **Groups & components** — isolate geometry, move / explode / edit as a
   unit, and **copy/paste** with a solid, textured preview under the cursor;
-  pasted component copies share their definition.
-- **Rotate & Protractor** — SketchUp's protractor: plane inference with
+  pasted component copies share their definition. **Paste in Place**
+  (Ctrl+Alt+V) drops the copy exactly where it was taken — the way to move
+  things into and out of groups without shifting them.
+- **Rotate & Protractor** — plane inference with
   axis-coloured disc, 15° tick snapping near it, slope input as rise:run
   (`3:12`), rotate-a-copy (Ctrl), fold-axis by dragging, and angled guide
-  lines that feed the snap engine.
+  lines that feed the snap engine; a click snapped to a point rotates by the
+  exact angle to it.
 - **Display styles** — Default, Architectural (textures on white), Shaded,
   Hidden line, Monochrome, Wireframe and X-ray; scenes remember their
   style and the sheet composer renders each viewport in any of them.
-- **Curved solids** — SketchUp-style soft edges: smooth cylinders, curved-surface
+- **Curved solids** — soft edges: smooth cylinders, curved-surface
   selection, view-dependent profile/silhouette edges.
-- **Materials** — solid color per face and **SketchUp-compatible textures**
+- **Materials** — solid color per face and **textures**
   (planar projection with real-world tile size), applied with a Paint tool —
   with a **named material registry**: paint keeps identity, edit-and-restamp
   updates every use, Model Info reports quantities per material, and exports
   carry the real names.
 - **Dimensions & leader texts** — static annotations with hidden-line
   occlusion and styles; texts select by their glyphs, move with the anchor
-  pinned, and edit on double-click. Both survive the `.skp` round trip.
-- **Side tray** — Materials, Dimension style, Entity info panels.
-- **SketchUp import AND export** — open `.skp` files natively (double-click
-  too), every era from classic 2013–2020 to current 2021+, with materials,
-  textures, per-side face materials, translucency, layers, scenes,
-  dimensions and leader texts — and **save your model back as `.skp`**
-  (groups, shared components, holes, named materials, dimensions and leader
-  texts included). Pure Python, offline, no Wine or proprietary DLL —
-  powered by [OpenSKP](https://github.com/iamahsanmehmood/openskp)
-  (see [Acknowledgements](#acknowledgements)).
+  pinned, and edit on double-click. Both come in from `.skp` files.
+- **Side tray** — Entity info, Layers, Scenes, Materials (213 RAL colours and
+  a textured library at real size), **Components** (scale figures, furniture,
+  trees, vehicles, your own face-me PNGs), Dimension style.
+- **`.skp` import** — open `.skp` files natively (double-click too), every
+  era from classic 2013–2020 to current 2021+, with materials, textures,
+  per-side face materials, translucency, layers, scenes, dimensions and
+  leader texts. Pure Python and offline — powered by
+  [OpenSKP](https://github.com/iamahsanmehmood/openskp) (see
+  [Acknowledgements](#acknowledgements)). There is no `.skp` export: to take
+  a model to another program, export COLLADA `.dae`, OBJ or glTF.
 - **Files** — native `.igz` save/open (self-contained: textures travel inside
-  the document), **import OBJ and COLLADA `.dae`**, **export STL, OBJ,
-  COLLADA and glTF/GLB** (STL for slicers; glTF with PBR materials and
-  geolocation).
+the document), **import STL (with principal-plane or advanced all-surface
+  coplanar merging), OBJ
+  and COLLADA `.dae`**, **export STL, OBJ,
+  COLLADA and glTF/GLB** (glTF with PBR materials and geolocation; STL
+  goes to a slicer as is — dedicated 3D-printing tools are planned for the
+  future).
 - **Layers & Scenes** — visibility/lock tags (plans emerge from one model)
   and saved views (camera + per-layer visibility), both imported from `.skp`.
 - **BIM tagging + IFC export** — tag freeform geometry with IFC classes
@@ -173,9 +181,9 @@ IFC import · extension manager UI · Flathub packaging.
 
 ## Why IngeTrazo
 
-There is no good native 3D CAD for the Linux-using civil engineer — SketchUp
-has no Linux build and FreeCAD's UX is painful. IngeTrazo is that missing tool:
-Linux-first, in Spanish, free software, and designed around the real workflow
+There was no good native 3D modeller for the civil engineer who works on
+Linux: the usual tools have no Linux build, or are hard to learn. IngeTrazo is
+that missing tool: Linux-first, in Spanish, free software, and designed around the real workflow
 of *tracing over a georeferenced site and tagging what you draw for takeoff*.
 
 ## Stack
@@ -210,17 +218,18 @@ Developed on **Python 3.14** (3.11+ should work). Run the tests with
 
 Contributors from anywhere are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
 and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). All code, comments and commit
-messages are in **English**; the UI speaks Spanish, English and Brazilian
-Portuguese (translations are one JSON file each under `i18n/`).
+messages are in **English**; the UI speaks Spanish, English, Brazilian
+Portuguese, Simplified Chinese and Italian (translations are one JSON file
+each under `i18n/`).
 
 ## Acknowledgements
 
 - **[Pedro Caeiro](https://github.com/pacaeiro)** — architectural and
   mechanical draftsman, and IngeTrazo's most persistent outside contributor:
   five merged pull requests and fifteen issues filed from real drafting work.
-  He uses IngeTrazo as if it were the tool he already knows and writes down
-  every gesture that does not answer the same way, which is how most of our
-  parity with SketchUp's everyday behaviour got found. See [AUTHORS](AUTHORS).
+  He draws with IngeTrazo every day and writes down every gesture that does
+  not answer the way a draftsman expects, which is how much of its everyday
+  behaviour got polished. See [AUTHORS](AUTHORS).
 - **Rafael García Rodríguez** — [Rafael 3D](https://www.youtube.com/@Rafa3D),
   draftsman and reviewer.
   His filmed reviews put the program through a professional's hands and
@@ -230,14 +239,18 @@ Portuguese (translations are one JSON file each under `i18n/`).
   drafting norms is not a technical tool, and that is knowledge we did not
   have.
 - **[OpenSKP](https://github.com/iamahsanmehmood/openskp)** (MIT) by Ahsan
-  Mehmood — the clean-room, pure-Python SketchUp `.skp` reader that powers
-  IngeTrazo's native import. It replaced our Wine/DLL converter path entirely.
+  Mehmood — the clean-room, pure-Python `.skp` reader that powers
+  IngeTrazo's native import.
   IngeTrazo contributes back upstream: material and texture fidelity, per-face
   UV mapping, image entities, style colors, back-side materials, edge display
   flags, and a full reader for the classic pre-2021 MFC container format. If
   you need to read `.skp` files from Python, use OpenSKP — and give it a star.
 - **[dafrobozao](https://github.com/dafrobozao)** — the Brazilian Portuguese
   translation of the interface (#54), IngeTrazo's third language.
+- **[liuandy](https://github.com/liujvnes)** — the Simplified Chinese
+  translation of the interface (#123), IngeTrazo's fourth language.
+- **[deedend](https://github.com/deedend)** — the Italian translation of the
+  interface (#182), IngeTrazo's fifth language.
 
 ## License
 
@@ -253,9 +266,10 @@ provided derivative works stay under the same license.
 
 ## En español
 
-**IngeTrazo** es un modelador 3D libre estilo SketchUp para arquitectura,
-ingeniería civil e impresión 3D, **hecho nativo para Linux** — donde casi no
-hay CAD para nuestra carrera. Es freeform en el núcleo (trazás lo que quieras,
+**IngeTrazo** (se lee *in-je-TRA-so*: *inge*niería + *trazo*) es un
+modelador 3D libre para arquitectura,
+ingeniería y diseño 3D, **hecho nativo para Linux** — donde casi no
+hay CAD para nuestra carrera ni para quien diseña en 3D. Es freeform en el núcleo (trazás lo que quieras,
 como dibujando a mano) con una capa **BIM opcional** planeada encima: taggeás la
 geometría como `IfcWall` / `IfcSlab` / `IfcColumn`, exportás a IFC y cerrás el
 loop **modelar → taggear → metrar → presupuestar** junto a
@@ -264,8 +278,16 @@ loop **modelar → taggear → metrar → presupuestar** junto a
 **Ya funciona de punta a punta:** dibujás (línea, rectángulo, círculo, arco,
 polígono), extruís con push/pull hermético grado-BIM, hacés muros con espesor
 (offset), movés, agrupás, pintás con colores y texturas, acotás, y exportás a
-STL/OBJ. **Abre archivos `.skp` de SketchUp de forma nativa** (con doble clic),
+STL/OBJ. **Abre archivos `.skp` de forma nativa** (con doble clic),
 de cualquier época (clásico 2013–2020 y actual 2021+), gracias a
-[OpenSKP](https://github.com/iamahsanmehmood/openskp) — sin Wine ni DLLs. En
+[OpenSKP](https://github.com/iamahsanmehmood/openskp). En
 desarrollo temprano, respaldado por ~870 tests. Software libre GPL-3.0, hecho
 en Perú. Más en [docs/](docs/).
+
+---
+
+*IngeTrazo is an independent project, written from scratch and not affiliated
+with any other software vendor; the file formats it reads belong to their
+respective owners. IngeTrazo es un proyecto independiente, escrito desde cero y
+sin relación con otros fabricantes de software; los formatos de archivo que lee
+pertenecen a sus respectivos dueños.*
