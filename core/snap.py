@@ -15,7 +15,12 @@ Snap kinds (priority high → low):
 10. ``"aligned"``       — level with / in line with an encouraged point across
                           the face under the cursor (the axis plane through it).
 11. ``"axis_inference"`` — soft auto-detected axis alignment (visual cue only).
-12. ``"none"``          — no snap.
+12. ``"on_face"``       — the free point on the face under the cursor.
+13. ``"none"``          — no snap.
+
+Some kinds name a POINT of the model and some name the FACE the cursor is
+over; ``POINT_SNAP_KINDS`` says which is which, and a planar shape reads it
+to know whether to re-plan onto a point or to follow that face (#545).
 
 Distance checks for point snaps are done in **screen-space pixels** so the
 snap radius stays constant under zoom. The caller supplies a
@@ -54,6 +59,23 @@ AXIS_COLORS = {
 }
 
 AXIS_NAMES = {"x": "X", "y": "Y", "z": "Z"}
+
+#: The snap kinds that name a real POINT of the model — a vertex, a midpoint,
+#: a crossing, a spot on an edge, the origin. When the cursor's own snap is
+#: one of these, that point is what the user aimed at (it may merely lie on a
+#: face, or on no face at all) and a shape re-plans onto it, through
+#: ``PlaneLock.snapped_plane``.
+#:
+#: Every OTHER kind names the FACE the cursor is over — ``"on_face"`` itself,
+#: the inferences the engine keeps ON that face (``"aligned"``,
+#: ``"from_point"``, ``"extension"``), the axis/shift locks — and there the
+#: face IS the answer: a planar shape follows it (``Viewport.
+#: _planar_face_plane``, #545). Same test as ``RotatedRectangleTool.
+#: _POINT_SNAPS``, which asks the same question of the protractor's width.
+POINT_SNAP_KINDS = frozenset({
+    "endpoint", "midpoint", "intersection", "on_edge", "on_line", "close",
+    "origin", "center", "centre", "component_origin", "arc_midpoint",
+})
 
 
 @dataclass
@@ -213,7 +235,7 @@ def _detect_axis_alignment(
 _MIN_AXIS_SCREEN_PX = 12.0
 
 #: How far along an axis the resolved point may land, as a multiple of how
-#: far the cursor itself is from the start. See the guard in ``compute_snap``.
+#: far the cursor itself is from the start. See ``_engaged_axis``.
 _MAX_AXIS_REACH = 5.0
 
 
@@ -239,11 +261,21 @@ def _detect_axis_on_screen(
     reach = (candidate_world - start).length()
     if reach < 1e-6:
         return None
-    sx, sy = world_to_pixel(start)
+    origin_px = world_to_pixel(start)
+    if origin_px is None:
+        return None
+    sx, sy = origin_px
     cx, cy = candidate_pixel
     best: Optional[tuple[float, str]] = None
     for name in ("x", "y", "z"):
-        ax, ay = world_to_pixel(start + _AXIS_VECTORS[name] * reach)
+        sample_px = world_to_pixel(start + _AXIS_VECTORS[name] * reach)
+        if sample_px is None:
+            # The sample lands where the camera cannot project (behind it, or
+            # off the near plane) - seen in the plan view zoomed onto the
+            # origin, where the z sample goes behind the camera. No line to
+            # measure against, so this axis offers no answer.
+            continue
+        ax, ay = sample_px
         dx, dy = ax - sx, ay - sy
         span = math.hypot(dx, dy)
         if span < _MIN_AXIS_SCREEN_PX:
@@ -254,6 +286,82 @@ def _detect_axis_on_screen(
         if dist <= threshold_px and (best is None or dist < best[0]):
             best = (dist, name)
     return best[1] if best else None
+
+
+#: How far out of a plane an axis may sit and still count as IN it: the same
+#: 1 mm-per-metre the shapes use to tell a point off their plane
+#: (``PlaneLock.OFF_PLANE_TOL``), so everything agrees on what "on the plane"
+#: means.
+_IN_PLANE_TOL = 1e-3
+
+
+def _axis_in_plane(name: Optional[str], normal: Optional[QVector3D]
+                   ) -> Optional[str]:
+    """``name`` when that axis lies IN the plane with this normal, else
+    ``None``. A missing or degenerate normal filters nothing."""
+    if name is None or normal is None:
+        return name
+    n = QVector3D(normal)
+    if n.length() < 1e-9:
+        return name
+    n = n.normalized()
+    if abs(QVector3D.dotProduct(_AXIS_VECTORS[name], n)) > _IN_PLANE_TOL:
+        return None
+    return name
+
+
+def _engaged_axis(
+    start_point: QVector3D,
+    candidate_world: QVector3D,
+    candidate_pixel: tuple[float, float],
+    world_to_pixel,
+    project_onto_line,
+    magnetic_axis_deg: Optional[float],
+    screen_axis_px: Optional[float],
+) -> Optional[str]:
+    """Which axis the drag has taken command of, or ``None``.
+
+    A tool asks for one or both detectors: ``magnetic_axis_deg`` for the work
+    plane's own two axes (world space), ``screen_axis_px`` for the axes the
+    plane CANNOT offer (issue #31/#42). The **screen answer wins where it
+    exists**, because it is the gesture the hand is actually making - and
+    ``_detect_axis_on_screen``'s whole reason to exist is that a camera-facing
+    plane leaves X and Y unreachable in the world: the Move tool dragged
+    exactly along X produced ``axis:z`` for all thirty steps of the iso test
+    (measured 2026-09-18) because the world detector can only see the plane's
+    normal. Preferring the screen cannot change an answer the world detector
+    already gave on the Line tool's grid study (zero cells of 57k where the two
+    disagreed), and where they DO disagree it says what the cursor points at.
+
+    The world detector keeps its turn when the screen is blind: an axis
+    pointing at the camera projects to a dot and is skipped there. A screen
+    runaway - an edge-on axis is one pixel of mouse per metre of line, so a
+    stray pixel is a point 16 km out (Marco, first live test) - is NOT an
+    engagement: the point may not run further from the start than
+    ``_MAX_AXIS_REACH`` times where the cursor actually is, and past that the
+    call is handed to the world detector exactly as before.
+
+    Point snaps are deliberately NOT consulted here. They sit above the axis
+    in :func:`compute_snap` and still win - going to fetch a vertex with the
+    mouse is the one thing the caller must not switch off.
+    """
+    if start_point is None or project_onto_line is None:
+        return None
+    if screen_axis_px is not None:
+        axis = _detect_axis_on_screen(
+            start_point, candidate_world, candidate_pixel,
+            world_to_pixel, screen_axis_px,
+        )
+        if axis is not None:
+            reach = (candidate_world - start_point).length()
+            locked = project_onto_line(start_point, _AXIS_VECTORS[axis])
+            if (locked - start_point).length() <= _MAX_AXIS_REACH * reach:
+                return axis
+    if magnetic_axis_deg is not None:
+        return _detect_axis_alignment(
+            start_point, candidate_world, magnetic_axis_deg
+        )
+    return None
 
 
 def _direction_from_edge(edge, mode: str,
@@ -750,17 +858,26 @@ def _in_plane_with_point_snap(
 
 def _extension_snap(
     candidate_world, cx, cy, scene, world_to_pixel, et, start_point, is_occluded,
-    project_onto_line=None,
+    project_onto_line=None, plane_normal=None,
 ) -> Optional[SnapResult]:
     """Extension / intersection inference: when the draw direction is collinear
     with an edge and the cursor is on that edge's *continuation* (beyond its
     ends), snap along it — and onto where it crosses another edge (a green
     connection point), so a line extends exactly onto a perpendicular one.
 
+    With ``plane_normal`` — the cursor is over a face — the extension is CUT
+    by that face: the point offered is where the edge's line crosses the
+    plane, and a crossing that lands far from the cursor is no offer at all.
+    An edge already lying IN the plane cuts nothing (its line is parallel to
+    it) and keeps the plain projection, which is in the plane too.
+
     ``None`` unless the draw is collinear with an edge near the cursor, which is
     what keeps every edge's infinite line from becoming snap noise."""
     if start_point is None:
         return None
+    if plane_normal is not None:
+        n = QVector3D(plane_normal)
+        plane_normal = n.normalized() if n.length() > 1e-9 else None
     draw = candidate_world - start_point
     if draw.length() < 1e-6:
         return None
@@ -813,6 +930,15 @@ def _extension_snap(
                 continue
             at = project_onto_line(edge.a, u)
         t = QVector3D.dotProduct(at - edge.a, u)
+        if plane_normal is not None:
+            # The far end of the extension is where the edge's line meets
+            # the plane the cursor is on, not where the cursor ray happens
+            # to fall on the edge's line (#545). ``candidate_world`` is the
+            # cursor's own point on that plane, so it gives the offset.
+            denom = QVector3D.dotProduct(plane_normal, u)
+            if abs(denom) > 1e-6:
+                t = (QVector3D.dotProduct(plane_normal,
+                                          candidate_world - edge.a) / denom)
         if -1e-6 <= t <= ab.length() + 1e-6:
             continue  # on the segment itself
         proj = edge.a + u * t
@@ -848,6 +974,10 @@ def _extension_snap(
         if best_hit is None or dh < best_hit[0]:
             best_hit = (dh, hit)
     if best_hit is not None:
+        if (best_hit[1] - from_end).lengthSquared() < 1e-12:
+            # The extension «crosses» its neighbour at its own end: that
+            # point is the Endpoint, not an Intersection (#357).
+            return SnapResult(best_hit[1], "endpoint", COLOR_ENDPOINT)
         return SnapResult(best_hit[1], "intersection", COLOR_ENDPOINT,
                           guide=(from_end, best_hit[1]))
     return SnapResult(proj, "extension", COLOR_EXTENSION, guide=(from_end, proj))
@@ -1089,10 +1219,18 @@ def _intersection_snap(
             if is_occluded is not None and is_occluded(hit):
                 continue
             if best is None or dh < best[0]:
-                best = (dh, hit)
+                best = (dh, hit, e1, e2)
     if best is None:
         return None
-    return SnapResult(best[1], "intersection", COLOR_ENDPOINT)
+    hit = best[1]
+    corners = (best[2].a, best[2].b, best[3].a, best[3].b)
+    if any((hit - c).lengthSquared() < 1e-12 for c in corners):
+        # Two edges meeting at a shared corner «intersect» there, and
+        # between the endpoint rule's radius and this one the corner came
+        # back labelled Intersection. Same point, so it keeps the snap —
+        # under its true name (#357, @kellytait).
+        return SnapResult(hit, "endpoint", COLOR_ENDPOINT)
+    return SnapResult(hit, "intersection", COLOR_ENDPOINT)
 
 
 def _lock_line_snaps(
@@ -1186,6 +1324,7 @@ def compute_snap(
     inference_angle_deg: float = 3.0,
     screen_axis_px: Optional[float] = None,
     is_occluded: Optional[Callable[[QVector3D], bool]] = None,
+    are_occluded: Optional[Callable[[list], list]] = None,
     face_under_cursor: bool = False,
     edge_threshold_px: Optional[float] = None,
     magnetic_axis_deg: Optional[float] = None,
@@ -1198,6 +1337,7 @@ def compute_snap(
     linear_mode: str = "all",
     work_plane_normal: Optional[QVector3D] = None,
     radial_arm: bool = False,
+    axis_in_plane: bool = False,
 ) -> SnapResult:
     # Linear-inference toggle (Alt): "all" = every inference, "off" =
     # point snaps only, "parallel_perp" = keep only parallel/perpendicular. The
@@ -1211,6 +1351,52 @@ def compute_snap(
     # through the reference just clicked, and a chord of the next circle
     # turned the angle with the cursor's distance (issue #140, @pacaeiro).
     line_inferences = allow_axis and not radial_arm
+    # On a face, the LINE inferences stay ON that face: rule 5 (extension)
+    # and rule 8d ('level with a point across the face'). A line is drawn in
+    # ONE plane, and the face under the cursor is the one the badge names —
+    # an inference that answered off it left the point, the plane and the
+    # readout describing three different things (#545, @pacaeiro). The point
+    # inferences (endpoint, midpoint, on-edge, origin) are deliberately NOT
+    # constrained: a vertex is a vertex, and the shape re-plans onto it (see
+    # ``PlaneLock.snapped_plane``).
+    on_plane = work_plane_normal if face_under_cursor else None
+    # A point acquired where the operation STARTED adds nothing: every line
+    # through the start along an axis is the axis inference itself. Left in,
+    # its derived «From point» outranked the axis cue it derives from, so
+    # dragging an edge along red read «From point» all the way and even
+    # nudged the point off the cursor (#368, @pacaeiro — the family where a
+    # derived inference must never beat what it comes from). It still counts
+    # as one of TWO acquired points: their crossing is a real inference.
+    if (acquired_point is not None and start_point is not None
+            and (acquired_point - start_point).lengthSquared() < 1e-12):
+        acquired_point = None
+
+    # The axis that has taken command of the drag, settled once here and used
+    # twice below: it silences the DERIVED linear inferences (rules 4b, 5, 5b,
+    # 5c, 7, 8b, 8c, 8d) so nothing can steal the point off the line, and rule 9
+    # returns it as the lock. The POINT inferences are deliberately NOT silenced
+    # - the endpoint/close snaps, 'through point' and the origin still outrank
+        # it, because fetching a vertex with the mouse is the one thing that must
+    # keep winning (issue #140 pins 'through point' above the magnet on the Line
+    # tool). Explicit locks always have the last word. See
+    # :func:`_engaged_axis`.
+    axis_engaged = None
+    if allow_axis and project_onto_line is not None:
+        axis_engaged = _engaged_axis(
+            start_point, candidate_world, candidate_pixel, world_to_pixel,
+            project_onto_line, magnetic_axis_deg, screen_axis_px,
+        )
+        if axis_in_plane:
+            # A shape that lives in ONE plane can only be magnetised along
+            # the axes that plane HOLDS. An axis it cannot hold would carry
+            # the point off the plane, and a circle's rim — measured IN the
+            # plane — collapses to nothing while the badge still reads «On
+            # face» (#545, @pacaeiro: «em determinadas faces o círculo já
+            # não segue a posição do rato, fica a metade ou menos ainda»).
+            # Over an axis-aligned face the plane holds two world axes and
+            # the magnet keeps working; over a sloped one it holds none of
+            # them and the cursor's own point on the face stands.
+            axis_engaged = _axis_in_plane(axis_engaged, work_plane_normal)
 
     # 1. Explicit axis lock (arrow keys). Use the viewport's camera-aware
     #    projection so locks to Z (vertical) actually move along Z. Existing
@@ -1367,11 +1553,32 @@ def compute_snap(
         pending.sort(key=lambda c: (math.floor(c[0] / _TIE_PX),
                                     0 if c[4] is None else 1))
         chosen = None
-        for d, world, kind, color, context, occludable in pending:
+        # Once the nearest candidate turns out hidden, the next ones are
+        # asked in batches (``are_occluded``) that double in size — 8, 16,
+        # 32… — until one is visible. A dense model hides dozens behind
+        # the first wall and a ray each was most of the hover's cost; but
+        # the first visible candidate is usually the ~9th of ~100 (city-L,
+        # pileta-fuente), so one batch of ALL the rest did 10x the work
+        # the one-by-one walk did. Doubling bounds the waste to ~2x.
+        hidden: dict = {}
+        batch = 8
+        for k, (d, world, kind, color, context, occludable) in enumerate(pending):
             # Only snap to geometry the user can actually see — a vertex
             # hidden behind a face shouldn't light up.
-            if occludable and is_occluded is not None and is_occluded(world):
-                continue
+            if occludable and is_occluded is not None:
+                if k in hidden:
+                    if hidden[k]:
+                        continue
+                elif are_occluded is not None and hidden:
+                    nxt = [j for j in range(k, len(pending)) if pending[j][5]][:batch]
+                    batch *= 2
+                    hidden.update(zip(nxt, are_occluded(
+                        [pending[j][1] for j in nxt])))
+                    if hidden[k]:
+                        continue
+                elif is_occluded(world):
+                    hidden[k] = True       # from here on, ask in batches
+                    continue
             chosen = (d, world, kind, color, context)
             break
         pending.clear()
@@ -1438,9 +1645,13 @@ def compute_snap(
     #     perpendicular line crosses another edge near the cursor (the parallel
     #     wall) as a green point. Gated on having started on the edge and drawing
     #     square to it, so it's high priority (beats midpoint/on-edge) without
-    #     fighting free-angle drawing. Runs before the axis inference so it fires
-    #     even when the perpendicular happens to be an axis.
-    if allow_parperp and start_point is not None and project_onto_line is not None:
+    #     fighting free-angle drawing. Yields to an engaged axis (see above).
+    if (
+        allow_parperp
+        and axis_engaged is None
+        and start_point is not None
+        and project_onto_line is not None
+    ):
         draw = candidate_world - start_point
         if draw.length() > 1e-6:
             draw_u = draw.normalized()
@@ -1481,7 +1692,9 @@ def compute_snap(
                 # projection win: landing where this perpendicular lines up with
                 # a corner is the exact point the user is after, and the generic
                 # lock would otherwise shadow it.
-                if line_inferences:
+                
+                if line_inferences and axis_engaged is None:
+
                     fp = _from_point_snap(
                         scene, start_point, candidate_world - start_point,
                         cx, cy, world_to_pixel, threshold_px, is_occluded,
@@ -1531,10 +1744,13 @@ def compute_snap(
     #     a perpendicular one. Gated on the draw direction being collinear with
     #     the edge, so it only fires when you mean to extend (no line noise).
     #     Runs before 'from point' so extending a line wins over a corner line-up.
-    if line_inferences:
+    
+    if line_inferences and axis_engaged is None:
+
         ext = _extension_snap(
             candidate_world, cx, cy, scene, world_to_pixel, et, start_point,
             is_occluded, project_onto_line=project_onto_line,
+            plane_normal=on_plane,
         )
         if ext is not None:
             return ext
@@ -1543,7 +1759,7 @@ def compute_snap(
     #     corner (green) or midpoint (cyan) — the fixed foot of that point on the
     #     axis-aligned draw line. Only fires on-axis, so free-angle draws stay
     #     quiet and the point never scatters or slides.
-    if line_inferences and start_point is not None:
+    if line_inferences and start_point is not None and axis_engaged is None:
         fp = _from_point_snap(
             scene, start_point, candidate_world - start_point,
             cx, cy, world_to_pixel, threshold_px, is_occluded,
@@ -1558,7 +1774,7 @@ def compute_snap(
     #     the cursor slid along the nearest guide. Runs before midpoint/on-edge
     #     so the exact crossing wins, but below every endpoint and lock.
     inter = _intersection_snap(cx, cy, scene, world_to_pixel, et, is_occluded)
-    if inter is not None:
+    if inter is not None and axis_engaged is None:
         return inter
 
     # 6. Midpoint + origin.
@@ -1600,7 +1816,26 @@ def compute_snap(
             continue
         if best_edge is None or d < best_edge[0]:
             best_edge = (d, on_pt, edge)
-    if best_edge is not None:
+    # 7a. With an axis engaged the on-edge point is silenced (it would pull
+    #     the point off the line), but the edge under the cursor may CROSS
+    #     the axis line: that crossing is on the line AND on the edge, the
+    #     junction the arrow lock already offers (1c). Without it a line or
+    #     arc drawn along red from one edge of a face to the opposite one
+    #     landed 1–2 mm inside or outside the edge depending on the pixel,
+    #     and left loose stubs (0.5.7 landed exactly; the chair backrest of
+    #     the tutorial hunt, 2026-10-12).
+    if best_edge is not None and axis_engaged is not None:
+        _d, _on_pt, edge = best_edge
+        hit = _line_segment_intersection(
+            start_point, _AXIS_VECTORS[axis_engaged], edge.a, edge.b)
+        if hit is not None:
+            hp = world_to_pixel(hit)
+            if (hp is not None
+                    and math.hypot(hp[0] - cx, hp[1] - cy) <= et
+                    and (is_occluded is None or not is_occluded(hit))):
+                return SnapResult(hit, "intersection", COLOR_ENDPOINT,
+                                  guide=(start_point, hit))
+    if best_edge is not None and axis_engaged is None:
         _d, on_pt, edge = best_edge
         if line_inferences and acquired_point is not None:
             # On an edge AND lined up with the acquired point: the one point
@@ -1625,6 +1860,7 @@ def compute_snap(
     #     inference below so they keep their red/green/blue cue.
     if (
         allow_parperp
+        and axis_engaged is None
         and acquired_edge is not None
         and start_point is not None
         and project_onto_line is not None
@@ -1645,7 +1881,12 @@ def compute_snap(
 
     # 8c. Perpendicular to an encouraged face: heading along its normal locks
     #     the line square-out of the face (magenta).
-    if allow_parperp and start_point is not None and project_onto_line is not None:
+    if (
+        allow_parperp
+        and axis_engaged is None
+        and start_point is not None
+        and project_onto_line is not None
+    ):
         pf = _perpendicular_face_snap(
             start_point, acquired_face_normal, candidate_world - start_point,
             project_onto_line, inference_angle_deg,
@@ -1695,7 +1936,9 @@ def compute_snap(
     #     have let an alignment line outrank a midpoint or the origin, and
     #     that precedence is not ours to spend. Down here it competes only
     #     with the soft axis cue below — the weakest rule there is.
-    if line_inferences:
+    
+    if line_inferences and axis_engaged is None:
+
         if acquired_points:
             tp = _two_point_snap(
                 acquired_points, candidate_world, cx, cy, world_to_pixel,
@@ -1704,8 +1947,8 @@ def compute_snap(
             if tp is not None:
                 return tp
         if acquired_point is not None:
-            # On a face, the point stays on the face (see the function).
-            on_plane = work_plane_normal if face_under_cursor else None
+            # On a face, the point stays on the face (see the function and
+            # ``on_plane`` up top).
             fp = _first_point_from_point(
                 acquired_point, candidate_world, cx, cy, world_to_pixel,
                 threshold_px, is_occluded, plane_normal=on_plane,
@@ -1724,64 +1967,38 @@ def compute_snap(
                 if ip is not None:
                     return ip
 
-    # 9. Axis inference. A soft visual cue when the tool asks for nothing more.
-    #    When ``magnetic_axis_deg`` is set (the Move tool), the inference is
-    #    *magnetic*: within that wider angle of an axis the point is projected
-    #    onto the axis line and hard-locked, so dragging roughly up moves
-    #    straight up and the geometry keeps its length and alignment without
-    #    holding a modifier. Point/edge snaps above still win, so you can still
-    #    move exactly onto an existing vertex.
-    if start_point is not None:
-        # ``allow_axis`` gates the magnetic branch too. It did not, and that
-        # was a hole in issue #26: Alt is supposed to switch the linear
-        # inferences OFF, and measured on 2026-09-18 the Move tool still
-        # snapped to the axis with the toggle off. Nobody had noticed
-        # because Move was the only tool magnetic enough to show it.
-        if (allow_axis and magnetic_axis_deg is not None
-                and project_onto_line is not None):
-            inferred = _detect_axis_alignment(
-                start_point, candidate_world, magnetic_axis_deg
+                # 9. The axis that took command, then the soft cue. The *magnetic* axis
+    #    (Move, Line, Tape, issue #31) used to be resolved only here, under
+    #    every derived inference - which is exactly what issue #42 was: the axis
+    #    could not take command because it only ever spoke last, and an off-line
+    #    intersection eight pixels away outranked it. The derived linear
+    #    inferences are silenced while an axis is engaged (the guards above), so
+    #    arriving here with one engaged means it LOCKS - projected onto the axis
+    #    as the arrow lock does. Point inferences were left untouched, so a
+    #    vertex, a 'through point' or the origin fetched with the mouse still
+    #    wins.
+    if axis_engaged is not None:
+        return SnapResult(
+            project_onto_line(start_point, _AXIS_VECTORS[axis_engaged]),
+            "axis", AXIS_COLORS[axis_engaged], axis=axis_engaged,
+        )
+    #    The cue kept below is the visual-only fallback: the cursor is near an
+    #    axis and the marker says so, but nothing is projected and nothing is
+    #    locked.
+    if start_point is not None and allow_axis:
+        inferred = _detect_axis_alignment(
+            start_point, candidate_world, inference_angle_deg
+        )
+        if axis_in_plane:
+            # …and the cue itself obeys the plane: left unfiltered it lit
+            # the blue axis on a face whose plane cannot hold it, and the
+            # Shift lock captures whatever cue is showing (#545).
+            inferred = _axis_in_plane(inferred, work_plane_normal)
+        if inferred is not None:
+            return SnapResult(
+                candidate_world, "axis_inference", AXIS_COLORS[inferred],
+                axis=inferred,
             )
-            if inferred is not None:
-                locked = project_onto_line(start_point, _AXIS_VECTORS[inferred])
-                return SnapResult(locked, "axis", AXIS_COLORS[inferred], axis=inferred)
-        # …and the axes that one CANNOT reach, measured in pixels instead
-        # (issue #31). Deliberately placed after it and only consulted when
-        # it found nothing: an axis the work plane already offers keeps
-        # coming from the world detector, so this can only turn a "no
-        # inference" into one and never change an answer that existed.
-        # Inert until a tool asks for it by setting ``screen_axis_px``.
-        if (allow_axis and screen_axis_px is not None
-                and project_onto_line is not None):
-            inferred = _detect_axis_on_screen(
-                start_point, candidate_world, candidate_pixel,
-                world_to_pixel, screen_axis_px,
-            )
-            if inferred is not None:
-                locked = project_onto_line(start_point, _AXIS_VECTORS[inferred])
-                # …but not to the other side of the county. Seen edge-on, an
-                # axis occupies almost no screen, so a pixel of mouse is
-                # metres of line: Marco's first live test put a point 16 km
-                # out and left him staring at empty space with nothing for
-                # zoom-to-extents to find. The point may not run further
-                # from the start than a small multiple of where the cursor
-                # actually is. Measured over the grid, the honest cases sit
-                # at D/R ≈ 1 (median 0.99, p99 2.05, worst 4.01), so this
-                # keeps every one of them and kills a runaway, which came
-                # in at some thousands.
-                reach = (candidate_world - start_point).length()
-                if (locked - start_point).length() <= _MAX_AXIS_REACH * reach:
-                    return SnapResult(locked, "axis", AXIS_COLORS[inferred],
-                                      axis=inferred)
-        if allow_axis:
-            inferred = _detect_axis_alignment(
-                start_point, candidate_world, inference_angle_deg
-            )
-            if inferred is not None:
-                return SnapResult(
-                    candidate_world, "axis_inference", AXIS_COLORS[inferred],
-                    axis=inferred,
-                )
 
     # 10. On-face: the cursor hovers a face with nothing closer to snap to.
     #     The candidate already lies on that face's plane (the work plane).

@@ -17,16 +17,21 @@ pattern); Cancel touches nothing.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QLabel,
@@ -34,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import general_settings as _gs
 from core.i18n import LANGUAGE_NAMES as _LANGUAGE_NAMES
 from core.i18n import available_languages, current_language, tr
 
@@ -83,6 +89,21 @@ class PreferencesDialog(QDialog):
             "view keeps its own style. Applies at once."))
         form.addRow(tr("Theme:"), self._theme)
 
+        from views.theme import ACCENTS, accent_color, saved_accent
+        self._accent = QComboBox()
+        for key, label, _rgb in ACCENTS:
+            swatch = QPixmap(14, 14)
+            swatch.fill(accent_color(key))
+            self._accent.addItem(QIcon(swatch), tr(label), key)
+        self._accent.setCurrentIndex(max(0, self._accent.findData(
+            saved_accent())))
+        self._accent.setToolTip(tr(
+            "Colour of the details of the icons and of the toolbar buttons "
+            "under the mouse. «Same as the system» uses the desktop's "
+            "accent colour. The selection in the 3D view stays orange. "
+            "Applies at once."))
+        form.addRow(tr("Accent colour:"), self._accent)
+
         self._rest = QComboBox()
         for key, label in _REST_MODES:
             self._rest.addItem(tr(label), key)
@@ -92,15 +113,14 @@ class PreferencesDialog(QDialog):
 
         row = QHBoxLayout()
         self._autosave = QCheckBox(tr("Auto-save every"))
-        self._autosave.setChecked(str(st.value("general/autosave", "1"))
+        self._autosave.setChecked(str(_gs.value("autosave", "1", st))
                                   != "0")
         row.addWidget(self._autosave)
         self._autosave_min = QSpinBox()
         self._autosave_min.setRange(1, 60)
         self._autosave_min.setSuffix(" " + tr("min"))
         try:
-            self._autosave_min.setValue(int(st.value("general/autosave_min",
-                                                     5)))
+            self._autosave_min.setValue(int(_gs.value("autosave_min", 5, st)))
         except (TypeError, ValueError):
             self._autosave_min.setValue(5)
         self._autosave.toggled.connect(self._autosave_min.setEnabled)
@@ -111,13 +131,13 @@ class PreferencesDialog(QDialog):
 
         self._backup = QCheckBox(tr("Keep a backup of the previous save "
                                     "(.igz.bak)"))
-        self._backup.setChecked(str(st.value("general/backup", "1")) != "0")
+        self._backup.setChecked(str(_gs.value("backup", "1", st)) != "0")
         form.addRow("", self._backup)
 
         self._undo_steps = QSpinBox()
         self._undo_steps.setRange(0, 5000)
         self._undo_steps.setSpecialValueText(tr("unlimited"))
-        self._undo_steps.setValue(int(st.value("general/undo_steps", 200)))
+        self._undo_steps.setValue(int(_gs.value("undo_steps", 200, st)))
         self._undo_steps.setToolTip(tr(
             "Steps kept for Undo. Each one holds a snapshot of the model, "
             "so fewer steps mean less memory on a big model; 0 = unlimited."))
@@ -136,6 +156,7 @@ class PreferencesDialog(QDialog):
         self._scale_figure.setChecked(
             str(st.value("new_document/scale_figure", "1")) != "0")
         form.addRow("", self._scale_figure)
+        self._build_figure_rows(form, st)
 
         self._invert = QCheckBox(tr("Invert mouse wheel zoom"))
         self._invert.setChecked(str(st.value("nav/invert_wheel", "0"))
@@ -183,7 +204,7 @@ class PreferencesDialog(QDialog):
                            (WAYLAND, tr("Wayland")), (XCB, tr("X11 (XWayland)"))):
             self._platform.addItem(label, key)
         self._platform.setCurrentIndex(max(0, self._platform.findData(
-            str(st.value("general/platform", AUTO) or AUTO))))
+            str(_gs.value("platform", AUTO, st) or AUTO))))
         self._platform.setToolTip(tr(
             "Which display server Qt draws through. Under Wayland with a "
             "125 % / 150 % display scale the viewport stutters; X11 "
@@ -303,26 +324,24 @@ class PreferencesDialog(QDialog):
         # property of the document (it travels in the .igz), shown here
         # because this is where people look for it (Marco, 2026-09-21).
         from core import units as _units
+        from views.units_panel import UnitsPanel
         scene = getattr(getattr(self._window, "viewport", None), "scene", None)
         current = _units.model_units_of(scene)
-        un = QWidget()
-        form = QFormLayout(un)
-        self._unit = QComboBox()
-        for code in _units.UNIT_CHOICES:
-            self._unit.addItem(_units.unit_label(code), code)
-        self._unit.setCurrentIndex(max(0, self._unit.findData(
-            current.get("length", "m"))))
-        form.addRow(tr("Length unit"), self._unit)
-        self._decimals = QSpinBox()
-        self._decimals.setRange(0, 6)
-        self._decimals.setValue(int(current.get("precision", 2)))
-        form.addRow(tr("Decimals"), self._decimals)
+        # The units panel (profile, length, area, volume, angle, decimal
+        # separator, preview): everything a readout is shown with. Its rows
+        # and the ones below share one form, like the other pages.
+        self._units_panel = UnitsPanel(current)
+        form = self._units_panel.form
         # Issue #121: the choice used to live only in the open document, so
         # every new file went back to metres.
         self._units_for_new = QCheckBox(tr("Also use for new documents"))
         self._units_for_new.setChecked(
             _units.new_document_units() == current)
         form.addRow("", self._units_for_new)
+        from views.units_start_dialog import ask_at_start
+        self._units_at_start = QCheckBox(tr("Ask which units to use at startup"))
+        self._units_at_start.setChecked(ask_at_start())
+        form.addRow("", self._units_at_start)
         note = QLabel(tr(
             "These are the units of the document you have open — they are "
             "saved with it. A number typed without a unit is in this unit "
@@ -330,8 +349,15 @@ class PreferencesDialog(QDialog):
             "every length and area on screen is shown in it. The dimension "
             "style follows it; its own panel can still set it apart."))
         note.setWordWrap(True)
+        from views.theme import style as theme_style
+        theme_style(note, "color:{muted}; font-size:11px;")
         form.addRow("", note)
+        un = QWidget()
+        page = QVBoxLayout(un)
+        page.addWidget(self._units_panel)
+        page.addStretch(1)
         tabs.addTab(un, tr("Units"))
+        self._units_page = un
 
         # ---- Keyboard shortcuts (issue #138) -------------------------------
         from views.shortcuts import ShortcutsPanel
@@ -345,26 +371,158 @@ class PreferencesDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def show_units_page(self) -> None:
+        """Open on the Units page (Window ▸ Units…, Ctrl+U)."""
+        self._tabs.setCurrentWidget(self._units_page)
+
     def show_shortcut_of(self, action) -> None:
         """Open on the Keyboard shortcuts page with ``action`` picked."""
         self._tabs.setCurrentWidget(self._shortcuts)
         self._shortcuts.pick(action)
 
     # ---- Apply --------------------------------------------------------------
+    # ---- Scale figure of new documents (#655) ----------------------------
+
+    def _build_figure_rows(self, form, st) -> None:
+        """Which person stands in a new document: one of the bundled cutouts
+        or the user's own picture (a PNG on a transparent background, and
+        the height that person stands)."""
+        from core import scale_figure as sf
+        self._figure = QComboBox()
+        for p in sf.people():
+            icon = QIcon(str(sf.people_dir() / f"{p['key']}.png"))
+            self._figure.addItem(
+                icon, f"{tr(p['name'])} ({float(p['height']):.2f} m)",
+                p["key"])
+        self._figure.addItem(tr("My own picture…"), sf.CUSTOM)
+        pick = str(st.value(sf.KEY_PICK, sf.DEFAULT_PICK) or sf.DEFAULT_PICK)
+        self._figure.setCurrentIndex(max(0, self._figure.findData(pick)))
+        form.addRow(tr("Scale figure:"), self._figure)
+
+        # The user's own picture: what is stored, a new file only once OK
+        # copies it into the data folder (Cancel leaves nothing behind).
+        image = str(st.value(sf.KEY_IMAGE, "") or "")
+        self._figure_image = image if Path(image).is_file() else ""
+        self._figure_source = ""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._figure_pick_btn = QPushButton(tr("Choose picture…"))
+        self._figure_pick_btn.clicked.connect(self._choose_figure_picture)
+        self._figure_height = QDoubleSpinBox()
+        self._figure_height.setRange(sf.MIN_HEIGHT, sf.MAX_HEIGHT)
+        self._figure_height.setDecimals(2)
+        self._figure_height.setSingleStep(0.01)
+        self._figure_height.setSuffix(" m")
+        self._figure_height.setToolTip(tr("The height this person stands"))
+        try:
+            self._figure_height.setValue(float(st.value(sf.KEY_HEIGHT, 1.70)))
+        except (TypeError, ValueError):
+            self._figure_height.setValue(1.70)
+        self._figure_name = QLineEdit(str(st.value(sf.KEY_NAME, "") or ""))
+        self._figure_name.setPlaceholderText(tr("Name"))
+        lay.addWidget(self._figure_pick_btn)
+        lay.addWidget(self._figure_height)
+        lay.addWidget(self._figure_name, 1)
+        self._figure_custom_row = row
+        form.addRow("", row)
+        self._figure_file_label = QLabel()
+        self._figure_file_label.setWordWrap(True)
+        form.addRow("", self._figure_file_label)
+
+        self._figure.currentIndexChanged.connect(self._on_figure_pick)
+        self._scale_figure.toggled.connect(self._sync_figure_rows)
+        self._figure_last = self._figure.currentIndex()
+        self._sync_figure_rows()
+
+    def _figure_is_custom(self) -> bool:
+        from core import scale_figure as sf
+        return self._figure.currentData() == sf.CUSTOM
+
+    def _sync_figure_rows(self) -> None:
+        on = self._scale_figure.isChecked()
+        custom = self._figure_is_custom()
+        self._figure.setEnabled(on)
+        self._figure_custom_row.setVisible(custom)
+        self._figure_custom_row.setEnabled(on)
+        shown = self._figure_source or self._figure_image
+        self._figure_file_label.setVisible(custom and bool(shown))
+        if shown:
+            self._figure_file_label.setText(
+                "<small>" + Path(shown).name + "</small>")
+
+    def _on_figure_pick(self, _index: int) -> None:
+        # «My own picture…» with none chosen yet asks for one at once; a
+        # cancelled dialog goes back to the person shown before.
+        if (self._figure_is_custom() and not self._figure_image
+                and not self._figure_source
+                and not self._choose_figure_picture()):
+            self._figure.blockSignals(True)
+            self._figure.setCurrentIndex(self._figure_last)
+            self._figure.blockSignals(False)
+        self._figure_last = self._figure.currentIndex()
+        self._sync_figure_rows()
+
+    def _choose_figure_picture(self) -> bool:
+        from views.filedialogs import file_dialogs as fd
+        path, _ = fd.getOpenFileName(
+            self, tr("Choose the picture of your scale figure"), "",
+            tr("Images") + " (*.png *.webp);;" + tr("All files") + " (*)")
+        if not path:
+            return False
+        from PySide6.QtGui import QImage
+        img = QImage(path)
+        if img.isNull() or img.height() == 0:
+            QMessageBox.warning(self, tr("Scale figure"),
+                                tr("That file is not a picture IngeTrazo can read."))
+            return False
+        if not img.hasAlphaChannel():
+            QMessageBox.information(
+                self, tr("Scale figure"),
+                tr("This picture has no transparent background, so it will "
+                   "show as a rectangle. A PNG cut out around the person "
+                   "looks best."))
+        self._figure_source = path
+        if not self._figure_name.text().strip():
+            self._figure_name.setText(Path(path).stem.replace("_", " "))
+        self._sync_figure_rows()
+        return True
+
+    def _save_figure(self, st) -> None:
+        from core import scale_figure as sf
+        pick = self._figure.currentData()
+        if pick == sf.CUSTOM and self._figure_source:
+            try:
+                self._figure_image = str(sf.store_picture(self._figure_source))
+            except (OSError, ValueError):
+                QMessageBox.warning(
+                    self, tr("Scale figure"),
+                    tr("The picture could not be copied; the previous "
+                       "figure is kept."))
+                return
+        if pick == sf.CUSTOM and not self._figure_image:
+            return
+        st.setValue(sf.KEY_PICK, pick)
+        if pick == sf.CUSTOM:
+            st.setValue(sf.KEY_IMAGE, self._figure_image)
+            st.setValue(sf.KEY_HEIGHT, round(self._figure_height.value(), 3))
+            st.setValue(sf.KEY_NAME, self._figure_name.text().strip())
+
     def accept(self) -> None:  # noqa: D102 — QDialog override
         st = QSettings()
 
         # Units of the open document (issue #33).
         from core import units as _units
         scene = getattr(getattr(self._window, "viewport", None), "scene", None)
-        chosen = {"length": str(self._unit.currentData()),
-                  "precision": int(self._decimals.value())}
+        chosen = self._units_panel.settings()
         if scene is not None and chosen != _units.model_units_of(scene):
             _units.apply_units(scene, chosen)
             scene.version += 1
             self._window.viewport.update()
         if self._units_for_new.isChecked():
             _units.remember_new_document_units(chosen)
+        from views.units_start_dialog import set_ask_at_start
+        set_ask_at_start(self._units_at_start.isChecked())
 
         # Language: same contract as the menu (persists; applies on restart).
         # Reverting a still-pending change back to the running language just
@@ -388,6 +546,13 @@ class PreferencesDialog(QDialog):
             from PySide6.QtWidgets import QApplication
             apply_theme(QApplication.instance(), theme)
 
+        from views.theme import apply_accent, save_accent, saved_accent
+        accent = self._accent.currentData()
+        if accent != saved_accent():
+            save_accent(accent)
+            from PySide6.QtWidgets import QApplication
+            apply_accent(QApplication.instance())
+
         # Rest-of-model mode: through the viewport (it persists the setting),
         # then the Camera menu checkmark follows.
         mode = self._rest.currentData()
@@ -397,19 +562,20 @@ class PreferencesDialog(QDialog):
             if act is not None:
                 act.setChecked(True)
 
-        st.setValue("general/autosave",
-                    "1" if self._autosave.isChecked() else "0")
-        st.setValue("general/autosave_min", self._autosave_min.value())
-        st.setValue("general/backup", "1" if self._backup.isChecked() else "0")
+        _gs.set_value("autosave", "1" if self._autosave.isChecked() else "0",
+                      st)
+        _gs.set_value("autosave_min", self._autosave_min.value(), st)
+        _gs.set_value("backup", "1" if self._backup.isChecked() else "0", st)
         st.setValue("section/ask_name",
                     "1" if self._ask_section.isChecked() else "0")
         st.setValue("new_document/scale_figure",
                     "1" if self._scale_figure.isChecked() else "0")
-        st.setValue("general/undo_steps", int(self._undo_steps.value()))
+        self._save_figure(st)
+        _gs.set_value("undo_steps", int(self._undo_steps.value()), st)
         history = getattr(getattr(self._window, "viewport", None), "history", None)
         if history is not None:
             history.max_steps = int(self._undo_steps.value())
-        st.setValue("general/platform", self._platform.currentData())
+        _gs.set_value("platform", self._platform.currentData(), st)
         setup = getattr(self._window, "_setup_autosave", None)
         if callable(setup):
             setup()                     # re-arm the timer with the new pace
